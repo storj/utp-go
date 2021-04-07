@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"storj.io/go-utp"
+	"storj.io/utp-go"
 )
 
 const MaxOutgoingQueueSize = 32
@@ -50,6 +50,10 @@ type UDPSocketManager struct {
 	Logger    utp.CompatibleLogger
 }
 
+func NewUDPSocketManager(logger utp.CompatibleLogger) *UDPSocketManager {
+	return &UDPSocketManager{Logger: logger}
+}
+
 func (usm *UDPSocketManager) SetSocket(sock *net.UDPConn) {
 	if usm.socket != nil && usm.socket != sock {
 		_ = usm.socket.Close()
@@ -61,6 +65,7 @@ func (usm *UDPSocketManager) Flush() {
 	for len(usm.outQueue) > 0 {
 		uo := usm.outQueue[0]
 
+		usm.Logger.Debugf("Flush->WriteTo(%x) len=%d", uo.mem, len(uo.mem))
 		_, err := usm.socket.WriteTo(uo.mem, uo.to)
 		if err != nil {
 			usm.Logger.Infof("sendto failed: %v", err)
@@ -74,50 +79,69 @@ func (usm *UDPSocketManager) Select(blockTime time.Duration) error {
 	if err != nil {
 		return err
 	}
+	var selectErr error
 	controlErr := socketRawConn.Control(func(socketFd uintptr) {
-		pfd := unix.PollFd{Fd: int32(socketFd), Events: unix.POLLIN}
-		var n int
-		n, err = unix.Poll([]unix.PollFd{pfd}, int(blockTime / time.Millisecond))
-		if err != nil || n == 0 {
-			return
-		}
-		usm.Flush()
-		if pfd.Revents & unix.POLLIN != 0 {
-			var buffer [8192]byte
-			for {
-				receivedBytes, srcAddr, err := usm.socket.ReadFromUDP(buffer[:])
-				if err != nil {
-					// ECONNRESET - On a UDP-datagram socket
-					// this error indicates a previous send operation
-					// resulted in an ICMP Port Unreachable message.
-					if err == syscall.ECONNRESET {
-						continue
-					}
-					// EMSGSIZE - The message was too large to fit into
-					// the buffer pointed to by the buf parameter and was
-					// truncated.
-					if err == syscall.EMSGSIZE {
-						continue
-					}
-					// any other error (such as EWOULDBLOCK) results in breaking the loop
-					break
-				}
-
-				// Lookup the right UTP socket that can handle this message
-				if utp.IsIncomingUTP(usm.Logger, nil, sendTo, usm, buffer[:receivedBytes], srcAddr) {
-					continue
-				}
-			}
-		}
-
-		if pfd.Revents & unix.POLLERR != 0 {
-			usm.Logger.Errorf("error condition on socket manager socket")
-		}
+		selectErr = usm.performSelect(blockTime, int32(socketFd))
 	})
 	if controlErr != nil {
 		return controlErr
 	}
-	return err
+	return selectErr
+}
+
+func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int32) error {
+	timeoutTime := time.Now().Add(blockTime)
+	var fds [1]unix.PollFd
+	for {
+		fds[0] = unix.PollFd{Fd: int32(socketFd), Events: unix.POLLIN}
+		n, err := unix.Poll(fds[:], int(time.Until(timeoutTime).Milliseconds()))
+		if err != nil || n == 0 {
+			if err == syscall.EINTR {
+				continue
+			}
+			return err
+		}
+		break
+	}
+	usm.Flush()
+	if fds[0].Revents&unix.POLLIN != 0 {
+		var buffer [8192]byte
+		for {
+			usm.Logger.Debugf("data available to read")
+			receivedBytes, srcAddr, err := usm.socket.ReadFromUDP(buffer[:])
+			usm.Logger.Debugf("got %d bytes from %v (%v)", receivedBytes, srcAddr, err)
+			if err != nil {
+				// ECONNRESET - On a UDP-datagram socket
+				// this error indicates a previous send operation
+				// resulted in an ICMP Port Unreachable message.
+				if err == syscall.ECONNRESET {
+					continue
+				}
+				// EMSGSIZE - The message was too large to fit into
+				// the buffer pointed to by the buf parameter and was
+				// truncated.
+				if err == syscall.EMSGSIZE {
+					continue
+				}
+				// any other error (such as EWOULDBLOCK) results in breaking the loop
+				break
+			}
+
+			// Lookup the right UTP socket that can handle this message
+			wasUTP := utp.IsIncomingUTP(usm.Logger, nil, sendTo, usm, buffer[:receivedBytes], srcAddr)
+			if wasUTP {
+				usm.Logger.Debugf("that was a utp packet")
+			} else {
+				usm.Logger.Debugf("that was NOT a utp packet")
+			}
+			break
+		}
+	}
+
+	if fds[0].Revents&unix.POLLERR != 0 {
+		usm.Logger.Errorf("error condition on socket manager socket")
+	}
+	return nil
 }
 
 func sendTo(userdata interface{}, p []byte, addr *net.UDPAddr) {
@@ -131,6 +155,7 @@ func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 
 	var err error
 	if len(usm.outQueue) == 0 {
+		usm.Logger.Debugf("Send->WriteTo(%x) len=%d", p, len(p))
 		_, err = usm.socket.WriteTo(p, addr)
 		if err != nil {
 			usm.Logger.Infof("sendto failed: %v", err)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -19,10 +20,15 @@ import (
 
 var (
 	logger *zap.SugaredLogger
+
+	debug = flag.Bool("debug", false, "Enable debug logging")
 )
 
 func main() {
-	if len(os.Args) < 3 {
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 2 {
 		_, _ = fmt.Fprintf(os.Stderr, `usage: %s dest-addr file-to-send
 
    dest-addr: destination node to connect to, in the form <host>:<port>
@@ -32,11 +38,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	dest := os.Args[1]
-	fileName := os.Args[2]
+	dest := args[0]
+	fileName := args[1]
 
 	logConfig := zap.NewDevelopmentConfig()
 	logConfig.Level.SetLevel(zap.InfoLevel)
+	if *debug {
+		logConfig.Level.SetLevel(zap.DebugLevel)
+	}
 	logConfig.Encoding = "console"
 	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	plainLogger, err := logConfig.Build()
@@ -65,7 +74,7 @@ func main() {
 		log.Fatalf("file is 0 bytes")
 	}
 
-	var sm utp_file.UDPSocketManager
+	sm := utp_file.NewUDPSocketManager(logger)
 
 	udpSock, err := utp_file.MakeSocket(":0")
 	if err != nil {
@@ -78,15 +87,16 @@ func main() {
 		log.Fatalf("could not resolve destination %q: %v", dest, err)
 	}
 
-	s := utp.Create(logger, cbSendTo, &sm, udpAddr)
+	s := utp.Create(logger, cbSendTo, sm, udpAddr)
 	s.SetSockOpt(syscall.SO_SNDBUF, 100*300)
 	logger.Infof("creating socket %p", s)
 
+	done := false
 	callbacks := utp.CallbackTable{
 		OnRead:     cbRead,
 		OnWrite:    func(_ interface{}, data []byte) { fillBuffer(s, dataFile, data) },
 		GetRBSize:  cbGetRBSize,
-		OnState:    func(_ interface{}, state utp.State) { handleStateChange(s, state, dataFile, fileSize) },
+		OnState:    func(_ interface{}, state utp.State) { done = handleStateChange(s, state, dataFile, fileSize) },
 		OnError:    func(_ interface{}, err error) { handleError(s, err) },
 		OnOverhead: nil,
 	}
@@ -98,8 +108,8 @@ func main() {
 	lastSent := 0
 	lastTime := time.Now()
 
-	for s != nil {
-		err := sm.Select(50000)
+	for !done {
+		err := sm.Select(50000 * time.Microsecond)
 		if err != nil {
 			log.Fatalf("failed to run Select(): %v", err)
 		}
@@ -129,8 +139,10 @@ func cbGetRBSize(userdata interface{}) int {
 }
 
 func handleError(conn *utp.Socket, err error) {
-	logger.Infof("socket error: %s\n", err)
-	conn.Close()
+	logger.Infof("socket error: %s", err)
+	if err := conn.Close(); err != nil {
+		logger.Errorf("could not close socket: %v", err)
+	}
 }
 
 func fillBuffer(conn *utp.Socket, dataFile *os.File, data []byte) {
@@ -139,20 +151,26 @@ func fillBuffer(conn *utp.Socket, dataFile *os.File, data []byte) {
 		n, err := dataFile.Read(data[pos:])
 		if err != nil {
 			logger.Infof("failed to read from datafile: %v", err)
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				logger.Errorf("could not close socket: %v", err)
+			}
 		}
 		pos += n
 	}
 }
 
-func handleStateChange(conn *utp.Socket, state utp.State, file io.Seeker, totalSize int64) {
-	if state == utp.StateConnect || state == utp.StateWritable {
+func handleStateChange(conn *utp.Socket, state utp.State, file io.Seeker, totalSize int64) bool {
+	switch state {
+	case utp.StateConnect, utp.StateWritable:
 		curPos, _ := file.Seek(0, io.SeekCurrent)
 		if conn.Write(int(totalSize - curPos)) {
 			logger.Infof("upload complete")
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				logger.Errorf("could not close socket: %v", err)
+			}
 		}
-	} else if state == utp.StateDestroying {
-		conn.Close()
+	case utp.StateDestroying:
+		return true
 	}
+	return false
 }

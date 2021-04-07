@@ -7,6 +7,7 @@ package utp
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"syscall"
@@ -272,6 +273,22 @@ func (pfa *PacketFormatAck) encodedSize() int {
 	return sizeofPacketFormatAck
 }
 
+func (pf *PacketFormatAck) encodeToBytes(b []byte) error {
+	if len(b) < sizeofPacketFormatAck {
+		return errors.New("buffer too small for object")
+	}
+	err := pf.PacketFormat.encodeToBytes(b[:sizeofPacketFormat])
+	if err != nil {
+		return err
+	}
+	b[sizeofPacketFormat] = pf.extNext
+	b[sizeofPacketFormat+1] = pf.extLen
+	for i, ackByte := range pf.acks {
+		b[sizeofPacketFormat+2+i] = ackByte
+	}
+	return nil
+}
+
 func (pfa *PacketFormatAck) setAcks(m uint32) {
 	pfa.acks[0] = byte(m & 0xff)
 	pfa.acks[1] = byte((m >> 8) & 0xff)
@@ -299,6 +316,20 @@ const sizeofPacketFormatExtensions = sizeofPacketFormatAck + 4
 
 func (*PacketFormatExtensions) encodedSize() int {
 	return sizeofPacketFormatExtensions
+}
+
+func (pf *PacketFormatExtensions) encodeToBytes(b []byte) error {
+	if len(b) < sizeofPacketFormatExtensions {
+		return errors.New("buffer too small for object")
+	}
+	err := pf.PacketFormatAck.encodeToBytes(b[:sizeofPacketFormatAck])
+	if err != nil {
+		return err
+	}
+	for i, extByte := range pf.extensions2 {
+		b[sizeofPacketFormatAck+i] = extByte
+	}
+	return nil
 }
 
 // use big-endian when encoding to buffer or wire
@@ -447,6 +478,22 @@ func (pfa *PacketFormatAckV1) encodedSize() int {
 	return sizeofPacketFormatAckV1
 }
 
+func (pf *PacketFormatAckV1) encodeToBytes(b []byte) error {
+	if len(b) < sizeofPacketFormatAckV1 {
+		return errors.New("buffer too small for object")
+	}
+	err := pf.PacketFormatV1.encodeToBytes(b[:sizeofPacketFormatV1])
+	if err != nil {
+		return err
+	}
+	b[sizeofPacketFormatV1] = pf.extNext
+	b[sizeofPacketFormatV1+1] = pf.extLen
+	for i, ackByte := range pf.acks {
+		b[sizeofPacketFormatV1+2+i] = ackByte
+	}
+	return nil
+}
+
 func (pfa *PacketFormatAckV1) setAcks(m uint32) {
 	pfa.acks[0] = byte(m & 0xff)
 	pfa.acks[1] = byte((m >> 8) & 0xff)
@@ -471,10 +518,24 @@ type PacketFormatExtensionsV1 struct {
 	extensions2 [4]byte
 }
 
-const sizeofPacketFormatExtensionsV1 = sizeofPacketFormatV1 + 10
+const sizeofPacketFormatExtensionsV1 = sizeofPacketFormatAckV1 + 4
 
 func (*PacketFormatExtensionsV1) encodedSize() int {
 	return sizeofPacketFormatExtensionsV1
+}
+
+func (pf *PacketFormatExtensionsV1) encodeToBytes(b []byte) error {
+	if len(b) < sizeofPacketFormatExtensionsV1 {
+		return errors.New("buffer too small for object")
+	}
+	err := pf.PacketFormatAckV1.encodeToBytes(b[:sizeofPacketFormatAckV1])
+	if err != nil {
+		return err
+	}
+	for i, extByte := range pf.extensions2 {
+		b[sizeofPacketFormatAckV1+i] = extByte
+	}
+	return nil
 }
 
 type packetFlag int
@@ -1241,19 +1302,24 @@ func (s *Socket) isWritable(toWrite int) bool {
 		s.lastMaxedOutWindow = currentMS
 	}
 
+	s.logDebug("isWritable(start): toWrite=%d curWindow=%d maxWindow=%d sendQuota=%d curWindowPackets=%d maxPacketSize=%d maxSend=%d", toWrite, s.curWindow, s.maxWindow, s.sendQuota, s.curWindowPackets, maxPacketSize, maxSend)
+
 	// if we don't have enough quota, we can't write regardless
 	if s.sendQuota/100 < int32(toWrite) {
+		s.logDebug("isWritable=false: sendQuota/100 (%d) < toWrite (%d)", s.sendQuota/100, toWrite)
 		return false
 	}
 
 	// subtract one to save space for the FIN packet
 	if s.curWindowPackets >= outgoingBufferMaxSize-1 {
+		s.logDebug("isWritable=false: curWindowPackets (%d) > outgoingBufferMaxSize-1 (%d)", s.curWindowPackets, outgoingBufferMaxSize-1)
 		return false
 	}
 
 	// if sending another packet would not make the window exceed
 	// the maxWindow, we can write
 	if s.curWindow+maxPacketSize <= maxSend {
+		s.logDebug("isWritable=true: curWindow (%d) + maxPacketSize (%d) <= maxSend (%d)", s.curWindow, maxPacketSize, maxSend)
 		return true
 	}
 
@@ -1265,9 +1331,11 @@ func (s *Socket) isWritable(toWrite int) bool {
 	// the send buffer, so we need to take the number of packets
 	// into account
 	if s.maxWindow < toWrite && s.curWindow < s.maxWindow && s.curWindowPackets == 0 {
+		s.logDebug("isWritable=true: curWindow (%d) < maxWindow (%d) < toWrite (%d) and curWindowPackets=0", s.curWindow, s.maxWindow, toWrite)
 		return true
 	}
 
+	s.logDebug("isWritable=false: default condition")
 	return false
 }
 
@@ -1553,7 +1621,7 @@ func (s *Socket) checkTimeouts() {
 getout:
 	// make sure we don't accumulate quota when we don't have
 	// anything to send
-	limit := int32(maxInt(s.maxWindow/2, 5*s.GetPacketSize()) * 100)
+	limit := maxInt32(int32(s.maxWindow)/2, 5*int32(s.GetPacketSize())) * 100
 	if s.sendQuota > limit {
 		s.sendQuota = limit
 	}
@@ -1570,12 +1638,12 @@ func (s *Socket) ackPacket(seq uint16) int {
 
 	// can't ack packets that haven't been sent yet!
 	if pkt.transmissions == 0 {
-		s.logDebug("%p: got ack for:%d (never sent, pkt_size:%d need_resend:%d)",
+		s.logDebug("%p: got ack for:%d (never sent, pkt_size:%d need_resend:%v)",
 			s, seq, pkt.payload, pkt.needResend)
 		return 2
 	}
 
-	s.logDebug("%p: got ack for:%d (pkt_size:%d need_resend:%d)",
+	s.logDebug("%p: got ack for:%d (pkt_size:%d need_resend:%v)",
 		s, seq, pkt.payload, pkt.needResend)
 
 	s.outbuf.put(int(seq), nil)
@@ -1897,7 +1965,7 @@ func (s *Socket) applyLEDBATControl(bytesAcked int, actualDelay uint32, minRTT i
 	if s.rtoHist.delayBase != 0 {
 		showDelayBase = s.rtoHist.delayBase
 	}
-	s.logInfo("%p: actual_delay:%d our_delay:%d their_delay:%d off_target:%d max_window:%d delay_base:%d delay_sum:%d target_delay:%d acked_bytes:%d cur_window:%d scaled_gain:%f rtt:%d rate:%d quota:%d wnduser:%d rto:%d timeout:%d get_microseconds:%d cur_window_packets:%d packet_size:%d their_delay_base:%d their_actual_delay:%d",
+	s.logDebug("%p: actual_delay:%d our_delay:%d their_delay:%d off_target:%d max_window:%d delay_base:%d delay_sum:%d target_delay:%d acked_bytes:%d cur_window:%d scaled_gain:%f rtt:%d rate:%d quota:%d wnduser:%d rto:%d timeout:%d get_microseconds:%d cur_window_packets:%d packet_size:%d their_delay_base:%d their_actual_delay:%d",
 		s, actualDelay, ourDelay/1000, s.theirHist.getValue()/1000,
 		int(offTarget)/1000, s.maxWindow, s.outHist.delayBase,
 		(uint32(ourDelay)+s.theirHist.getValue())/1000, target/1000, bytesAcked,
@@ -2887,6 +2955,7 @@ func (s *Socket) Write(numBytes int) bool {
 		s.logDebug("%p: Write %d bytes = false (not CSConnected)", s, numBytes)
 		return false
 	}
+	param := numBytes
 
 	currentMS = getMilliseconds()
 
@@ -2900,7 +2969,7 @@ func (s *Socket) Write(numBytes int) bool {
 		// Also add it to the outgoing of packets that have been sent but not ACKed.
 
 		if numToSend == 0 {
-			s.logDebug("%p: Write %d bytes = true", s, numBytes)
+			s.logDebug("%p: Write %d bytes = true", s, param)
 			return true
 		}
 		numBytes -= numToSend
@@ -2977,23 +3046,26 @@ func GetGlobalStats() GlobalStats {
 // It is not valid to issue commands for this socket after it is closed.
 // This does not actually destroy the socket until outstanding data is sent, at which
 // point the socket will change to the StateDestroying state.
-func (s *Socket) Close() {
-	assert(s.state != CSDestroyDelay && s.state != CSFinSent && s.state != CSDestroy)
+func (s *Socket) Close() error {
+	if s.state == CSDestroyDelay || s.state == CSFinSent || s.state == CSDestroy {
+		return fmt.Errorf("can not close socket in state %s", stateNames[s.state])
+	}
 
 	s.logDebug("%p: Close in state:%s", s, stateNames[s.state])
 
 	switch s.state {
-	case CSConnected:
-	case CSConnectedFull:
+	case CSConnected, CSConnectedFull:
 		s.state = CSFinSent
 		s.writeOutgoingPacket(0, STFin)
 
 	case CSSynSent:
 		s.rtoTimeout = uint(getMilliseconds()) + minUint(s.rto*2, 60)
+		fallthrough
 	case CSGotFin:
 		s.state = CSDestroyDelay
 
 	default:
 		s.state = CSDestroy
 	}
+	return nil
 }
