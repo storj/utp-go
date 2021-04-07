@@ -1,6 +1,7 @@
 package utp_file
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
@@ -43,11 +44,10 @@ type UDPOutgoing struct {
 }
 
 type UDPSocketManager struct {
-	totalSent int
-	count     int
-	socket    *net.UDPConn
-	outQueue  []UDPOutgoing
-	Logger    utp.CompatibleLogger
+	socket               *net.UDPConn
+	outQueue             []UDPOutgoing
+	Logger               utp.CompatibleLogger
+	OnIncomingConnection func(*utp.Socket) error
 }
 
 func NewUDPSocketManager(logger utp.CompatibleLogger) *UDPSocketManager {
@@ -56,7 +56,9 @@ func NewUDPSocketManager(logger utp.CompatibleLogger) *UDPSocketManager {
 
 func (usm *UDPSocketManager) SetSocket(sock *net.UDPConn) {
 	if usm.socket != nil && usm.socket != sock {
-		_ = usm.socket.Close()
+		if err := usm.socket.Close(); err != nil {
+			usm.Logger.Infof("failed to close old UDP socket during SetSocket: %v", err)
+		}
 	}
 	usm.socket = sock
 }
@@ -66,7 +68,7 @@ func (usm *UDPSocketManager) Flush() {
 		uo := usm.outQueue[0]
 
 		usm.Logger.Debugf("Flush->WriteTo(%x) len=%d", uo.mem, len(uo.mem))
-		_, err := usm.socket.WriteTo(uo.mem, uo.to)
+		_, err := usm.socket.WriteToUDP(uo.mem, uo.to)
 		if err != nil {
 			usm.Logger.Infof("sendto failed: %v", err)
 			break
@@ -93,7 +95,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 	timeoutTime := time.Now().Add(blockTime)
 	var fds [1]unix.PollFd
 	for {
-		fds[0] = unix.PollFd{Fd: int32(socketFd), Events: unix.POLLIN}
+		fds[0] = unix.PollFd{Fd: socketFd, Events: unix.POLLIN}
 		n, err := unix.Poll(fds[:], int(time.Until(timeoutTime).Milliseconds()))
 		if err != nil || n == 0 {
 			if err == syscall.EINTR {
@@ -107,20 +109,26 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 	if fds[0].Revents&unix.POLLIN != 0 {
 		var buffer [8192]byte
 		for {
-			usm.Logger.Debugf("data available to read")
 			receivedBytes, srcAddr, err := usm.socket.ReadFromUDP(buffer[:])
-			usm.Logger.Debugf("got %d bytes from %v (%v)", receivedBytes, srcAddr, err)
 			if err != nil {
 				// ECONNRESET - On a UDP-datagram socket
 				// this error indicates a previous send operation
 				// resulted in an ICMP Port Unreachable message.
 				if err == syscall.ECONNRESET {
+					// (storj): do we have a way to know which previous send
+					// operation? or a way to tie it to an existing connection,
+					// so we can pass the error on?
+					usm.Logger.Errorf("got ECONNRESET from udp socket")
 					continue
 				}
 				// EMSGSIZE - The message was too large to fit into
 				// the buffer pointed to by the buf parameter and was
 				// truncated.
 				if err == syscall.EMSGSIZE {
+					// (storj): this seems like a big huge hairy deal. the code
+					// shouldn't allow this to happen, and if it does, won't
+					// all subsequent traffic be potentially wrong?
+					usm.Logger.Errorf("got EMSGSIZE from udp socket")
 					continue
 				}
 				// any other error (such as EWOULDBLOCK) results in breaking the loop
@@ -128,11 +136,8 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 			}
 
 			// Lookup the right UTP socket that can handle this message
-			wasUTP := utp.IsIncomingUTP(usm.Logger, nil, sendTo, usm, buffer[:receivedBytes], srcAddr)
-			if wasUTP {
-				usm.Logger.Debugf("that was a utp packet")
-			} else {
-				usm.Logger.Debugf("that was NOT a utp packet")
+			if !utp.IsIncomingUTP(usm.Logger, gotIncomingConnection, sendTo, usm, buffer[:receivedBytes], srcAddr) {
+				usm.Logger.Debugf("received a non-µTP packet on UDP port from %s", srcAddr)
 			}
 			break
 		}
@@ -156,7 +161,7 @@ func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 	var err error
 	if len(usm.outQueue) == 0 {
 		usm.Logger.Debugf("Send->WriteTo(%x) len=%d", p, len(p))
-		_, err = usm.socket.WriteTo(p, addr)
+		_, err = usm.socket.WriteToUDP(p, addr)
 		if err != nil {
 			usm.Logger.Infof("sendto failed: %v", err)
 		}
@@ -174,6 +179,28 @@ func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 	}
 }
 
-func (usm *UDPSocketManager) TotalSent() int {
-	return usm.totalSent
+func (usm *UDPSocketManager) Close() error {
+	err := usm.socket.Close()
+	usm.socket = nil
+	usm.Logger = nil
+	return err
+}
+
+var NotAcceptingConnections = errors.New("not accepting connections")
+
+func gotIncomingConnection(userdata interface{}, socket *utp.Socket) {
+	usm := userdata.(*UDPSocketManager)
+	usm.Logger.Debugf("incoming connection received from %v", socket.GetPeerName())
+	var err error
+	if usm.OnIncomingConnection != nil {
+		err = usm.OnIncomingConnection(socket)
+	} else {
+		err = NotAcceptingConnections
+	}
+	if err != nil {
+		usm.Logger.Infof("rejecting connection: %v", err)
+		if closeErr := socket.Close(); closeErr != nil {
+			usm.Logger.Infof("could not close new socket: %v", closeErr)
+		}
+	}
 }

@@ -91,10 +91,11 @@ func main() {
 	s.SetSockOpt(syscall.SO_SNDBUF, 100*300)
 	logger.Infof("creating socket %p", s)
 
+	totalSent := 0
 	done := false
 	callbacks := utp.CallbackTable{
 		OnRead:     cbRead,
-		OnWrite:    func(_ interface{}, data []byte) { fillBuffer(s, dataFile, data) },
+		OnWrite:    func(_ interface{}, data []byte) { fillBuffer(s, dataFile, data, &totalSent) },
 		GetRBSize:  cbGetRBSize,
 		OnState:    func(_ interface{}, state utp.State) { done = handleStateChange(s, state, dataFile, fileSize) },
 		OnError:    func(_ interface{}, err error) { handleError(s, err) },
@@ -116,8 +117,8 @@ func main() {
 		utp.CheckTimeouts()
 		curTime := time.Now()
 		if curTime.After(lastTime.Add(time.Second)) {
-			rate := float64(sm.TotalSent()-lastSent) / curTime.Sub(lastTime).Seconds()
-			lastSent = sm.TotalSent()
+			rate := float64(totalSent-lastSent) / curTime.Sub(lastTime).Seconds()
+			lastSent = totalSent
 			lastTime = curTime
 			fmt.Printf("\r[%d] sent: %d/%d  %.1f bytes/s  ", curTime.Unix(), lastSent, fileSize, rate)
 		}
@@ -141,21 +142,19 @@ func cbGetRBSize(userdata interface{}) int {
 func handleError(conn *utp.Socket, err error) {
 	logger.Infof("socket error: %s", err)
 	if err := conn.Close(); err != nil {
-		logger.Errorf("could not close socket: %v", err)
+		logger.Errorf("could not close µTP socket: %v", err)
 	}
 }
 
-func fillBuffer(conn *utp.Socket, dataFile *os.File, data []byte) {
-	pos := 0
-	for pos < len(data) {
-		n, err := dataFile.Read(data[pos:])
-		if err != nil {
-			logger.Infof("failed to read from datafile: %v", err)
-			if err := conn.Close(); err != nil {
-				logger.Errorf("could not close socket: %v", err)
-			}
+func fillBuffer(conn *utp.Socket, dataFile *os.File, data []byte, totalSent *int) {
+	n, err := dataFile.Read(data)
+	if err != nil {
+		logger.Infof("failed to read from datafile: %v", err)
+		if err := conn.Close(); err != nil {
+			logger.Errorf("could not close µTP socket: %v", err)
 		}
-		pos += n
+	} else {
+		*totalSent += n
 	}
 }
 
