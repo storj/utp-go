@@ -1,3 +1,6 @@
+// Copyright (c) 2021 Storj Labs, Inc.
+// See LICENSE for copying information.
+
 //+build utpdebug
 
 package utp
@@ -13,7 +16,7 @@ func (s *Stats) packetLost() {
 
 func (s *Stats) packetReceived(length int) {
 	s.NRecv++
-	s.NBytesRecv += len;
+	s.NBytesRecv += len
 }
 
 func (s *Stats) fastTransmitted() {
@@ -26,7 +29,7 @@ func (s *Stats) duplicateReceived() {
 
 func (s *Socket) checkInvariants() {
 	if s.reorderCount > 0 {
-		assert(s.inbuf.get(s.ackNum+ 1) == nil)
+		assert(s.inbuf.get(s.ackNum+1) == nil)
 	}
 
 	var outstandingBytes int

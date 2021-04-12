@@ -14,26 +14,40 @@ import (
 )
 
 const (
-	// number of bytes to increase max window size by, per RTT. This is
-	// scaled down linearly proportional to offTarget. i.e. if all packets
-	// in one window have 0 delay, window size will increase by this number.
-	// Typically it's less. TCP increases one MSS per RTT, which is 1500
+	// maxCWndIncreaseBytesPerRTT gives the number of bytes to increase max
+	// window size by, per RTT. This is scaled down linearly proportional to
+	// offTarget. I.e. if all packets in one window have 0 delay, window size
+	// will increase by this number. Typically it's less. TCP increases one MSS
+	// per RTT, which is 1500.
 	maxCWndIncreaseBytesPerRTT = 3000
-	curDelaySize               = 3
-	// experiments suggest that a clock skew of 10 ms per 325 seconds
-	// is not impossible. Reset delayBase every 13 minutes. The clock
-	// skew is dealt with by observing the delay base in the other
-	// direction, and adjusting our own upwards if the opposite direction
-	// delay base keeps going down
+	// curDelaySize controls the amount of history to be kept for the
+	// curDelay measurements on a connection.
+	curDelaySize = 3
+	// delayBaseHistory controls the amount of history to be kept for the
+	// delayBase measurements on a connection. Experiments suggest that a clock
+	// skew of 10 ms per 325 seconds is not impossible. The delayBase parameter
+	// will effectively be reset every delayBaseHistory minutes. The clock skew
+	// is dealt with by observing the delay base in the other direction, and
+	// adjusting our own upwards if the opposite direction delay base keeps
+	// going down.
 	delayBaseHistory = 13  // minutes
+	// maxWindowDecay controls the maximum amount of acceptable window decay
+	// before the µTP socket layer will decide to decay maxWindow.
 	maxWindowDecay   = 100 // ms
 
+	// reorderBufferMaxSize is the size of the reorder buffer.
 	reorderBufferMaxSize  = 511
+	// outgoingBufferMaxSize is the size of the outgoing buffer.
 	outgoingBufferMaxSize = 511
 
+	// packetSize is a size of a subdivision of a packet that doesn't appear to
+	// have a proper name in µTP. Maybe a better name than packetSize would be
+	// "chunkSize". Window sizes and send quotas are tracked in units of
+	// packetSize bytes.
 	packetSize = 350
 
-	// this is the minimum maxWindow value. It can never drop below this
+	// minWindowSize is the minimum maxWindow value. The maxWindow parameter
+	// can never drop below this value.
 	minWindowSize = 10
 
 	// when window sizes are smaller than one packetSize, this
@@ -47,8 +61,8 @@ const (
 	// know which value we're using implicitly.
 	//usePacketPacing = true
 
-	// if we receive 4 or more duplicate acks, we resend the packet
-	// that hasn't been acked yet
+	// duplicateAcksBeforeResend controls whether a packet is resent when some
+	// number of duplicate acks have been received.
 	duplicateAcksBeforeResend = 3
 
 	delayedAckByteThreshold = 2400 // bytes
@@ -93,8 +107,13 @@ const (
 	packetSizeHugeBucket  = 4
 )
 
+// packetHeader is an interface that can be fulfilled by packet headers in
+// all supported µTP versions. This interface reduces the amount of nearly-
+// duplicate code that needs to exist to support multiple packet header
+// versions.
+//
 // (storj): we'll use this in place of reinterpret-casting memory in buffers.
-type PacketHeader interface {
+type packetHeader interface {
 	getVersion() int8
 	setVersion(v int8)
 	getConnID() uint32
@@ -118,15 +137,17 @@ type PacketHeader interface {
 	decodeFromBytes(b []byte) error
 }
 
-type PacketAckHeader interface {
-	PacketHeader
+type packetAckHeader interface {
+	packetHeader
 	setAcks(m uint32)
 	setExtNext(n uint8)
 	setExtLen(n uint8)
 }
 
-// use big-endian when encoding to buffer or wire
-type PacketFormat struct {
+// packetFormat is the structure of packet headers in µTP version 0.
+//
+// Use big-endian when encoding to buffer or wire.
+type packetFormat struct {
 	// connection ID
 	connID     uint32
 	tvSec      uint32
@@ -146,11 +167,11 @@ type PacketFormat struct {
 
 const sizeofPacketFormat = 23
 
-func (pf *PacketFormat) encodedSize() int {
+func (pf *packetFormat) encodedSize() int {
 	return sizeofPacketFormat
 }
 
-func (pf *PacketFormat) encodeToBytes(b []byte) error {
+func (pf *packetFormat) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormat {
 		return errors.New("buffer too small for object")
 	}
@@ -167,7 +188,7 @@ func (pf *PacketFormat) encodeToBytes(b []byte) error {
 	return nil
 }
 
-func (pf *PacketFormat) decodeFromBytes(b []byte) error {
+func (pf *packetFormat) decodeFromBytes(b []byte) error {
 	if len(b) < sizeofPacketFormat {
 		return errors.New("buffer too small for object")
 	}
@@ -184,84 +205,84 @@ func (pf *PacketFormat) decodeFromBytes(b []byte) error {
 	return nil
 }
 
-func (pf *PacketFormat) getVersion() int8 {
+func (pf *packetFormat) getVersion() int8 {
 	return 0
 }
 
-func (pf *PacketFormat) setVersion(v int8) {
+func (pf *packetFormat) setVersion(v int8) {
 	if v != 0 {
-		panic("can not set version of PacketFormat to anything but 0!")
+		panic("can not set version of packetFormat to anything but 0!")
 	}
 }
 
-func (pf *PacketFormat) getConnID() uint32 {
+func (pf *packetFormat) getConnID() uint32 {
 	return pf.connID
 }
 
-func (pf *PacketFormat) setConnID(connID uint32) {
+func (pf *packetFormat) setConnID(connID uint32) {
 	pf.connID = connID
 }
 
-func (pf *PacketFormat) getPacketTime() uint64 {
+func (pf *packetFormat) getPacketTime() uint64 {
 	return uint64(pf.tvSec)*1000000 + uint64(pf.tvUSec)
 }
 
-func (pf *PacketFormat) setPacketTime(packetTime uint64) {
+func (pf *packetFormat) setPacketTime(packetTime uint64) {
 	pf.tvSec = uint32(packetTime / 1000000)
 	pf.tvUSec = uint32(packetTime % 1000000)
 }
 
-func (pf *PacketFormat) getReplyMicro() uint32 {
+func (pf *packetFormat) getReplyMicro() uint32 {
 	return pf.replyMicro
 }
 
-func (pf *PacketFormat) setReplyMicro(s uint32) {
+func (pf *packetFormat) setReplyMicro(s uint32) {
 	pf.replyMicro = s
 }
 
-func (pf *PacketFormat) getPacketType() packetFlag {
+func (pf *packetFormat) getPacketType() packetFlag {
 	return packetFlag(pf.flags)
 }
 
-func (pf *PacketFormat) setPacketType(t packetFlag) {
+func (pf *packetFormat) setPacketType(t packetFlag) {
 	pf.flags = byte(t)
 }
 
-func (pf *PacketFormat) getSequenceNumber() uint16 {
+func (pf *packetFormat) getSequenceNumber() uint16 {
 	return pf.seqNum
 }
 
-func (pf *PacketFormat) setSequenceNumber(n uint16) {
+func (pf *packetFormat) setSequenceNumber(n uint16) {
 	pf.seqNum = n
 }
 
-func (pf *PacketFormat) getAckNumber() uint16 {
+func (pf *packetFormat) getAckNumber() uint16 {
 	return pf.ackNum
 }
 
-func (pf *PacketFormat) setAckNumber(n uint16) {
+func (pf *packetFormat) setAckNumber(n uint16) {
 	pf.ackNum = n
 }
 
-func (pf *PacketFormat) getExt() int8 {
+func (pf *packetFormat) getExt() int8 {
 	return int8(pf.ext)
 }
 
-func (pf *PacketFormat) setExt(ext int8) {
+func (pf *packetFormat) setExt(ext int8) {
 	pf.ext = byte(ext)
 }
 
-func (pf *PacketFormat) getWindowSize() int {
+func (pf *packetFormat) getWindowSize() int {
 	return int(pf.windowSize) * packetSize
 }
 
-func (pf *PacketFormat) setWindowSize(ws int) {
+func (pf *packetFormat) setWindowSize(ws int) {
 	pf.windowSize = byte(divRoundUp(uint32(ws), packetSize))
 }
 
 // use big-endian when encoding to buffer or wire
-type PacketFormatAck struct {
-	PacketFormat
+type packetFormatAck struct {
+	packetFormat
 	extNext byte
 	extLen  byte
 	acks    [4]byte
@@ -269,15 +290,15 @@ type PacketFormatAck struct {
 
 const sizeofPacketFormatAck = sizeofPacketFormat + 6
 
-func (pfa *PacketFormatAck) encodedSize() int {
+func (pfa *packetFormatAck) encodedSize() int {
 	return sizeofPacketFormatAck
 }
 
-func (pf *PacketFormatAck) encodeToBytes(b []byte) error {
+func (pf *packetFormatAck) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatAck {
 		return errors.New("buffer too small for object")
 	}
-	err := pf.PacketFormat.encodeToBytes(b[:sizeofPacketFormat])
+	err := pf.packetFormat.encodeToBytes(b[:sizeofPacketFormat])
 	if err != nil {
 		return err
 	}
@@ -289,40 +310,40 @@ func (pf *PacketFormatAck) encodeToBytes(b []byte) error {
 	return nil
 }
 
-func (pfa *PacketFormatAck) setAcks(m uint32) {
+func (pfa *packetFormatAck) setAcks(m uint32) {
 	pfa.acks[0] = byte(m & 0xff)
 	pfa.acks[1] = byte((m >> 8) & 0xff)
 	pfa.acks[2] = byte((m >> 16) & 0xff)
 	pfa.acks[3] = byte((m >> 24) & 0xff)
 }
 
-func (pfa *PacketFormatAck) setExtNext(n uint8) {
+func (pfa *packetFormatAck) setExtNext(n uint8) {
 	pfa.extNext = n
 }
 
-func (pfa *PacketFormatAck) setExtLen(n uint8) {
+func (pfa *packetFormatAck) setExtLen(n uint8) {
 	pfa.extLen = n
 }
 
-type PacketFormatExtensions struct {
-	PacketFormatAck
-	// (storj): this is meant to overlay and extend PacketFormatAck.acks as
-	// a [8]byte. Instead, we'll just embed PacketFormatAck directly and
+type packetFormatExtensions struct {
+	packetFormatAck
+	// (storj): this is meant to overlay and extend packetFormatAck.acks as
+	// a [8]byte. Instead, we'll just embed packetFormatAck directly and
 	// add the extra bytes as a new field.
 	extensions2 [4]byte
 }
 
 const sizeofPacketFormatExtensions = sizeofPacketFormatAck + 4
 
-func (*PacketFormatExtensions) encodedSize() int {
+func (*packetFormatExtensions) encodedSize() int {
 	return sizeofPacketFormatExtensions
 }
 
-func (pf *PacketFormatExtensions) encodeToBytes(b []byte) error {
+func (pf *packetFormatExtensions) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatExtensions {
 		return errors.New("buffer too small for object")
 	}
-	err := pf.PacketFormatAck.encodeToBytes(b[:sizeofPacketFormatAck])
+	err := pf.packetFormatAck.encodeToBytes(b[:sizeofPacketFormatAck])
 	if err != nil {
 		return err
 	}
@@ -332,8 +353,10 @@ func (pf *PacketFormatExtensions) encodeToBytes(b []byte) error {
 	return nil
 }
 
-// use big-endian when encoding to buffer or wire
-type PacketFormatV1 struct {
+// packetFormatV1 is the structure of packet headers in µTP version 1.
+//
+// Use big-endian when encoding to buffer or wire.
+type packetFormatV1 struct {
 	// packet type (4 high bits)
 	// protocol version (4 low bits)
 	verType byte
@@ -354,11 +377,11 @@ type PacketFormatV1 struct {
 
 const sizeofPacketFormatV1 = 20
 
-func (pf *PacketFormatV1) encodedSize() int {
+func (pf *packetFormatV1) encodedSize() int {
 	return sizeofPacketFormatV1
 }
 
-func (pf *PacketFormatV1) encodeToBytes(b []byte) error {
+func (pf *packetFormatV1) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatV1 {
 		return errors.New("buffer too small for object")
 	}
@@ -374,7 +397,7 @@ func (pf *PacketFormatV1) encodeToBytes(b []byte) error {
 	return nil
 }
 
-func (pf *PacketFormatV1) decodeFromBytes(b []byte) error {
+func (pf *packetFormatV1) decodeFromBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatV1 {
 		return errors.New("buffer too small for object")
 	}
@@ -390,83 +413,83 @@ func (pf *PacketFormatV1) decodeFromBytes(b []byte) error {
 	return nil
 }
 
-func (pf *PacketFormatV1) getVersion() int8 {
+func (pf *packetFormatV1) getVersion() int8 {
 	return int8(pf.verType & 0xf)
 }
 
-func (pf *PacketFormatV1) setVersion(v int8) {
+func (pf *packetFormatV1) setVersion(v int8) {
 	pf.verType = (pf.verType & 0xf0) | (byte(v) & 0xf)
 }
 
-func (pf *PacketFormatV1) getPacketType() packetFlag {
+func (pf *packetFormatV1) getPacketType() packetFlag {
 	return packetFlag(pf.verType >> 4)
 }
 
-func (pf *PacketFormatV1) setPacketType(t packetFlag) {
+func (pf *packetFormatV1) setPacketType(t packetFlag) {
 	pf.verType = (pf.verType & 0xf) | (byte(t) << 4)
 }
 
-func (pf *PacketFormatV1) getConnID() uint32 {
+func (pf *packetFormatV1) getConnID() uint32 {
 	return uint32(pf.connID)
 }
 
-func (pf *PacketFormatV1) setConnID(connID uint32) {
+func (pf *packetFormatV1) setConnID(connID uint32) {
 	pf.connID = uint16(connID)
 }
 
-func (pf *PacketFormatV1) getPacketTime() uint64 {
+func (pf *packetFormatV1) getPacketTime() uint64 {
 	return uint64(pf.tvUSec)
 }
 
-func (pf *PacketFormatV1) setPacketTime(t uint64) {
+func (pf *packetFormatV1) setPacketTime(t uint64) {
 	// (storj): this truncation causes the time field to wrap around in
 	// about 72 minutes. should be enough to measure a round-trip delay tho
 	pf.tvUSec = uint32(t)
 }
 
-func (pf *PacketFormatV1) getReplyMicro() uint32 {
+func (pf *packetFormatV1) getReplyMicro() uint32 {
 	return pf.replyMicro
 }
 
-func (pf *PacketFormatV1) setReplyMicro(s uint32) {
+func (pf *packetFormatV1) setReplyMicro(s uint32) {
 	pf.replyMicro = s
 }
 
-func (pf *PacketFormatV1) getSequenceNumber() uint16 {
+func (pf *packetFormatV1) getSequenceNumber() uint16 {
 	return pf.seqNum
 }
 
-func (pf *PacketFormatV1) setSequenceNumber(n uint16) {
+func (pf *packetFormatV1) setSequenceNumber(n uint16) {
 	pf.seqNum = n
 }
 
-func (pf *PacketFormatV1) getAckNumber() uint16 {
+func (pf *packetFormatV1) getAckNumber() uint16 {
 	return pf.ackNum
 }
 
-func (pf *PacketFormatV1) setAckNumber(n uint16) {
+func (pf *packetFormatV1) setAckNumber(n uint16) {
 	pf.ackNum = n
 }
 
-func (pf *PacketFormatV1) getExt() int8 {
+func (pf *packetFormatV1) getExt() int8 {
 	return int8(pf.ext)
 }
 
-func (pf *PacketFormatV1) setExt(ext int8) {
+func (pf *packetFormatV1) setExt(ext int8) {
 	pf.ext = byte(ext)
 }
 
-func (pf *PacketFormatV1) getWindowSize() int {
+func (pf *packetFormatV1) getWindowSize() int {
 	return int(pf.windowSize)
 }
 
-func (pf *PacketFormatV1) setWindowSize(ws int) {
+func (pf *packetFormatV1) setWindowSize(ws int) {
 	pf.windowSize = uint32(ws)
 }
 
 // use big-endian when encoding to buffer or wire
-type PacketFormatAckV1 struct {
-	PacketFormatV1
+type packetFormatAckV1 struct {
+	packetFormatV1
 	extNext byte
 	extLen  byte
 	acks    [4]byte
@@ -474,15 +497,15 @@ type PacketFormatAckV1 struct {
 
 const sizeofPacketFormatAckV1 = sizeofPacketFormatV1 + 6
 
-func (pfa *PacketFormatAckV1) encodedSize() int {
+func (pfa *packetFormatAckV1) encodedSize() int {
 	return sizeofPacketFormatAckV1
 }
 
-func (pf *PacketFormatAckV1) encodeToBytes(b []byte) error {
+func (pf *packetFormatAckV1) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatAckV1 {
 		return errors.New("buffer too small for object")
 	}
-	err := pf.PacketFormatV1.encodeToBytes(b[:sizeofPacketFormatV1])
+	err := pf.packetFormatV1.encodeToBytes(b[:sizeofPacketFormatV1])
 	if err != nil {
 		return err
 	}
@@ -494,41 +517,41 @@ func (pf *PacketFormatAckV1) encodeToBytes(b []byte) error {
 	return nil
 }
 
-func (pfa *PacketFormatAckV1) setAcks(m uint32) {
+func (pfa *packetFormatAckV1) setAcks(m uint32) {
 	pfa.acks[0] = byte(m & 0xff)
 	pfa.acks[1] = byte((m >> 8) & 0xff)
 	pfa.acks[2] = byte((m >> 16) & 0xff)
 	pfa.acks[3] = byte((m >> 24) & 0xff)
 }
 
-func (pfa *PacketFormatAckV1) setExtNext(n uint8) {
+func (pfa *packetFormatAckV1) setExtNext(n uint8) {
 	pfa.extNext = n
 }
 
-func (pfa *PacketFormatAckV1) setExtLen(n uint8) {
+func (pfa *packetFormatAckV1) setExtLen(n uint8) {
 	pfa.extLen = n
 }
 
 // use big-endian when encoding to buffer or wire
-type PacketFormatExtensionsV1 struct {
-	PacketFormatAckV1
-	// (storj): this is meant to overlay and extend PacketFormatAckV1.acks as
-	// a [8]byte. Instead, we'll just embed PacketFormatAckV1 directly and
+type packetFormatExtensionsV1 struct {
+	packetFormatAckV1
+	// (storj): this is meant to overlay and extend packetFormatAckV1.acks as
+	// a [8]byte. Instead, we'll just embed packetFormatAckV1 directly and
 	// add the extra bytes as a new field.
 	extensions2 [4]byte
 }
 
 const sizeofPacketFormatExtensionsV1 = sizeofPacketFormatAckV1 + 4
 
-func (*PacketFormatExtensionsV1) encodedSize() int {
+func (*packetFormatExtensionsV1) encodedSize() int {
 	return sizeofPacketFormatExtensionsV1
 }
 
-func (pf *PacketFormatExtensionsV1) encodeToBytes(b []byte) error {
+func (pf *packetFormatExtensionsV1) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatExtensionsV1 {
 		return errors.New("buffer too small for object")
 	}
-	err := pf.PacketFormatAckV1.encodeToBytes(b[:sizeofPacketFormatAckV1])
+	err := pf.packetFormatAckV1.encodeToBytes(b[:sizeofPacketFormatAckV1])
 	if err != nil {
 		return err
 	}
@@ -541,35 +564,35 @@ func (pf *PacketFormatExtensionsV1) encodeToBytes(b []byte) error {
 type packetFlag int
 
 const (
-	STData  packetFlag = 0 // Data packet.
-	STFin              = 1 // Finalize the connection. This is the last packet.
-	STState            = 2 // State packet. Used to transmit an ACK with no data.
-	STReset            = 3 // Terminate connection forcefully.
-	STSyn              = 4 // Connect SYN
+	stData  packetFlag = 0 // Data packet.
+	stFin              = 1 // Finalize the connection. This is the last packet.
+	stState            = 2 // State packet. Used to transmit an ACK with no data.
+	stReset            = 3 // Terminate connection forcefully.
+	stSyn              = 4 // Connect SYN
 
-	STNumStates = 5 // used for bounds checking
+	stNumStates = 5 // used for bounds checking
 )
 
 var flagNames = []string{
 	"STData", "STFin", "STState", "STReset", "STSyn",
 }
 
-type ConnState int
+type connState int
 
 const (
-	CSIdle          ConnState = 0
-	CSSynSent                 = 1
-	CSConnected               = 2
-	CSConnectedFull           = 3
-	CSGotFin                  = 4
-	CSDestroyDelay            = 5
-	CSFinSent                 = 6
-	CSReset                   = 7
-	CSDestroy                 = 8
+	csIdle          connState = 0
+	csSynSent                 = 1
+	csConnected               = 2
+	csConnectedFull           = 3
+	csGotFin                  = 4
+	csDestroyDelay            = 5
+	csFinSent                 = 6
+	csReset                   = 7
+	csDestroy                 = 8
 )
 
 var stateNames = []string{
-	"CSIdle", "CSSynSent", "CSConnected", "CSConnectedFull", "CSGotFin", "CSDestroyDelay", "CSFinSent", "CSReset", "CSDestroy",
+	"csIdle", "csSynSent", "csConnected", "csConnectedFull", "csGotFin", "csDestroyDelay", "csFinSent", "csReset", "csDestroy",
 }
 
 type outgoingPacket struct {
@@ -578,7 +601,7 @@ type outgoingPacket struct {
 	timeSent      uint64 // microseconds
 	transmissions uint32
 	needResend    bool
-	header        PacketHeader
+	header        packetHeader
 	data          []byte
 }
 
@@ -591,34 +614,34 @@ func noState(interface{}, State)                       {}
 func noError(interface{}, error)                       {}
 func noOverhead(interface{}, bool, int, BandwidthType) {}
 
-type SizableCircularBuffer struct {
+type sizableCircularBuffer struct {
 	// This is the mask. Since it's always a power of 2, adding 1 to this value will return the size.
 	mask int
 	// This is the elements that the circular buffer points to
 	elements [][]byte
 }
 
-func (scb *SizableCircularBuffer) get(i int) []byte {
+func (scb *sizableCircularBuffer) get(i int) []byte {
 	return scb.elements[i&scb.mask]
 }
 
-func (scb *SizableCircularBuffer) put(i int, data []byte) {
+func (scb *sizableCircularBuffer) put(i int, data []byte) {
 	scb.elements[i&scb.mask] = data
 }
 
-func (scb *SizableCircularBuffer) ensureSize(item, index int) {
+func (scb *sizableCircularBuffer) ensureSize(item, index int) {
 	if index > scb.mask {
 		scb.grow(item, index)
 	}
 }
 
-func (scb *SizableCircularBuffer) size() int {
+func (scb *sizableCircularBuffer) size() int {
 	return scb.mask + 1
 }
 
 // Item contains the element we want to make space for
 // index is the index in the list.
-func (scb *SizableCircularBuffer) grow(item, index int) {
+func (scb *sizableCircularBuffer) grow(item, index int) {
 	// Figure out the new size.
 	size := scb.mask + 1
 	for {
@@ -643,38 +666,38 @@ func (scb *SizableCircularBuffer) grow(item, index int) {
 	scb.elements = buf
 }
 
-// SizableCircularBufferOutgoing is exactly the same as
-// SizableCircularBuffer, except it has an array of outgoingPacket pointers
+// sizableCircularBufferOutgoing is exactly the same as
+// sizableCircularBuffer, except it has an array of outgoingPacket pointers
 // instead of an array of byte slices. Hell's bells, generics really can not
 // come soon enough.
-type SizableCircularBufferOutgoing struct {
+type sizableCircularBufferOutgoing struct {
 	// This is the mask. Since it's always a power of 2, adding 1 to this value will return the size.
 	mask int
 	// This is the elements that the circular buffer points to
 	elements []*outgoingPacket
 }
 
-func (scb *SizableCircularBufferOutgoing) get(i int) *outgoingPacket {
+func (scb *sizableCircularBufferOutgoing) get(i int) *outgoingPacket {
 	return scb.elements[i&scb.mask]
 }
 
-func (scb *SizableCircularBufferOutgoing) put(i int, elem *outgoingPacket) {
+func (scb *sizableCircularBufferOutgoing) put(i int, elem *outgoingPacket) {
 	scb.elements[i&scb.mask] = elem
 }
 
-func (scb *SizableCircularBufferOutgoing) ensureSize(item, index int) {
+func (scb *sizableCircularBufferOutgoing) ensureSize(item, index int) {
 	if index > scb.mask {
 		scb.grow(item, index)
 	}
 }
 
-func (scb *SizableCircularBufferOutgoing) size() int {
+func (scb *sizableCircularBufferOutgoing) size() int {
 	return scb.mask + 1
 }
 
 // Item contains the element we want to make space for
 // index is the index in the list.
-func (scb *SizableCircularBufferOutgoing) grow(item, index int) {
+func (scb *sizableCircularBufferOutgoing) grow(item, index int) {
 	// Figure out the new size.
 	size := scb.mask + 1
 	for {
@@ -715,7 +738,7 @@ func wrappingCompareLess(lhs, rhs uint32) bool {
 	return distUp < distDown
 }
 
-type DelayHist struct {
+type delayHist struct {
 	delayBase uint32
 
 	// this is the history of delay samples,
@@ -738,7 +761,7 @@ type DelayHist struct {
 	delayBaseInitialized bool
 }
 
-func (dh *DelayHist) clear() {
+func (dh *delayHist) clear() {
 	dh.delayBaseInitialized = false
 	dh.delayBase = 0
 	dh.curDelayIdx = 0
@@ -752,7 +775,7 @@ func (dh *DelayHist) clear() {
 	}
 }
 
-func (dh *DelayHist) shift(offset uint32) {
+func (dh *delayHist) shift(offset uint32) {
 	// the offset should never be "negative"
 	// assert(offset < 0x10000000)
 
@@ -765,7 +788,7 @@ func (dh *DelayHist) shift(offset uint32) {
 	dh.delayBase += offset
 }
 
-func (dh *DelayHist) addSample(sample uint32) {
+func (dh *delayHist) addSample(sample uint32) {
 	// The two clocks (in the two peers) are assumed not to
 	// progress at the exact same rate. They are assumed to be
 	// drifting, which causes the delay samples to contain
@@ -857,7 +880,7 @@ func (dh *DelayHist) addSample(sample uint32) {
 	}
 }
 
-func (dh *DelayHist) getValue() uint32 {
+func (dh *delayHist) getValue() uint32 {
 	value := uint32(math.MaxUint32)
 	for i := 0; i < curDelaySize; i++ {
 		value = minUint32(dh.curDelayHist[i], value)
@@ -866,12 +889,59 @@ func (dh *DelayHist) getValue() uint32 {
 	return value
 }
 
+// CompatibleLogger is an attempt at making a generic interface for loggers,
+// to which most major logger types can hopefully be adapted without much
+// effort.
 type CompatibleLogger interface {
 	Infof(template string, args ...interface{})
 	Debugf(template string, args ...interface{})
 	Errorf(template string, args ...interface{})
 }
 
+// Socket represents a µTP socket, which roughly corresponds to one connection
+// to an internet peer. It is important to distinguish µTP sockets from UDP
+// sockets; although µTP may be used over UDP, there is not a 1-1 correlation
+// from µTP sockets to UDP sockets.
+//
+// Sockets are created using the Create() method (for outgoing connections) or
+// in the course of processing an incoming packet with IsIncomingUTP() (for
+// incoming connections). In the latter case, the socket object will be
+// provided to your code by way of the GotIncomingConnection callback.
+//
+// Sockets created directly with Create() will need to have the appropriate
+// callbacks registered (with SetCallbacks()) before they can initiate the
+// outgoing connection. To initiate the outgoing connection, use the Connect()
+// method.
+//
+// Sockets received by way of a GotIncomingConnection callback represent
+// incoming connections, and should not have Connect() called on them.
+//
+// When your code wants to send data on a Socket, use the Write() method to
+// indicate the amount of data that is ready to be sent. At the appropriate
+// time, the Socket will use the OnWriteCallback to collect the actual data.
+// The OnWriteCallback will only accept a limited amount of data; enough to
+// fill a single packet. If there is more data than that to be sent, it is
+// appropriate to call Write() again with the new total amount (the amount
+// given to Write() is considered the _total_ amount of data which is ready
+// to be written; it is not added to the amount previously indicated).
+//
+// When data is received from the other end of the connection, the Socket
+// will call its OnReadCallback to pass the received data on to your code.
+//
+// If a connection times out or is rejected or reset by the peer, the Socket
+// will call its OnErrorCallback.
+//
+// When a connection becomes writable (connected enough to accept outgoing
+// data), or a connection is closed, the Socket's OnStateChangeCallback will be
+// called.
+//
+// Your code must call utp.CheckTimeouts() periodically; as often as desired to
+// give the µTP code a chance to notice that a socket has timed out. No
+// background threads remain running to manage µTP state; µTP code is only run
+// when your code calls into it (usually via utp.IsIncomingUTP(),
+// utp.CheckTimeouts(), or the Socket methods).
+//
+// See the documentation on the various types of callback to learn more.
 type Socket struct {
 	addr *net.UDPAddr
 
@@ -909,7 +979,7 @@ type Socket struct {
 	maxWindowUser int
 	// 0 = original uTP header, 1 = second revision
 	version int8
-	state   ConnState
+	state   connState
 	// TickCount when we last decayed window (wraps)
 	lastRWinDecay int32
 
@@ -969,7 +1039,7 @@ type Socket struct {
 	rttVariance uint
 	// Round trip timeout
 	rto               uint
-	rtoHist           DelayHist
+	rtoHist           delayHist
 	retransmitTimeout uint
 	// The RTO timer will timeout here.
 	rtoTimeout uint
@@ -984,14 +1054,14 @@ type Socket struct {
 	// Last rcv window we advertised, in bytes
 	lastReceiveWindow int
 
-	outHist   DelayHist
-	theirHist DelayHist
+	outHist   delayHist
+	theirHist delayHist
 
 	// extension bytes from SYN packet
 	extensions [8]byte
 
-	inbuf  SizableCircularBuffer
-	outbuf SizableCircularBufferOutgoing
+	inbuf  sizableCircularBuffer
+	outbuf sizableCircularBufferOutgoing
 
 	// Public stats, returned by GetStats(). Not collected unless built
 	// with the utpstats build tag.
@@ -1056,10 +1126,14 @@ func (s *Socket) sentAck() {
 	s.bytesSinceAck = 0
 }
 
+// GetUDPMTU returns the maximum size of UDP packets that may be sent using
+// this Socket.
 func (s *Socket) GetUDPMTU() int {
 	return int(GetUDPMTU(s.addr))
 }
 
+// GetUDPOverhead returns the number of bytes of overhead that apply to each
+// UDP packet sent (the size of a UDP header plus IPv4 or IPv6 overhead).
 func (s *Socket) GetUDPOverhead() int {
 	return int(getUDPOverhead(s.addr))
 }
@@ -1072,6 +1146,9 @@ func (us *Socket) getGlobalUTPBytesSent() uint64 {
 }
 */
 
+// GetOverhead returns the number of bytes of overhead that apply to each µTP
+// packet sent (GetUDPOverhead() plus the size of the µTP packet header for the
+// µTP protocol version in use for this connection).
 func (s *Socket) GetOverhead() int {
 	return s.GetUDPOverhead() + s.getHeaderSize()
 }
@@ -1085,7 +1162,7 @@ func (s *Socket) logInfo(fmtString string, args ...interface{}) {
 }
 
 var (
-	globalRSTInfo    RSTInfoList
+	globalRSTInfo    rstInfoList
 	globalUTPSockets []*Socket
 )
 
@@ -1117,7 +1194,7 @@ func sendToAddr(sendToProc PacketSendCallback, sendToUserdata interface{}, p []b
 // header (that is, data[0:b.encodedSize()] will be overwritten). This is
 // done partially in order to avoid copies and partially to remain close
 // to the structure of the original C++ code.
-func (s *Socket) sendData(b PacketHeader, data []byte, bwType BandwidthType) {
+func (s *Socket) sendData(b packetHeader, data []byte, bwType BandwidthType) {
 	// time stamp this packet with local time, the stamp goes into
 	// the header of every packet at the 8th byte for 8 bytes :
 	// two integers, check packet.h for more
@@ -1158,16 +1235,16 @@ func (s *Socket) sendData(b PacketHeader, data []byte, bwType BandwidthType) {
 }
 
 func (s *Socket) sendAck(synack bool) {
-	var pa PacketAckHeader
+	var pa packetAckHeader
 	if s.version == 0 {
-		pa = &PacketFormatAck{}
+		pa = &packetFormatAck{}
 	} else {
-		pa = &PacketFormatAckV1{}
+		pa = &packetFormatAckV1{}
 	}
 	s.lastReceiveWindow = s.getRcvWindow()
 	pa.setVersion(s.version)
 	pa.setConnID(s.connIDSend)
-	pa.setPacketType(STState)
+	pa.setPacketType(stState)
 	pa.setAckNumber(s.ackNum)
 	pa.setSequenceNumber(s.seqNum)
 	pa.setExt(0)
@@ -1175,7 +1252,7 @@ func (s *Socket) sendAck(synack bool) {
 
 	// we never need to send EACK for connections
 	// that are shutting down
-	if s.reorderCount != 0 && s.state < CSGotFin {
+	if s.reorderCount != 0 && s.state < csGotFin {
 		// if reorder count > 0, send an EACK.
 		// reorder count should always be 0
 		// for synacks, so this should not be
@@ -1206,10 +1283,10 @@ func (s *Socket) sendAck(synack bool) {
 
 		s.logDebug("%p: Sending ACK %d [%d] with extension bits", s, s.ackNum, s.connIDSend)
 		switch pfa := pa.(type) {
-		case *PacketFormatAck:
-			pa = &PacketFormatExtensions{PacketFormatAck: *pfa}
-		case *PacketFormatAckV1:
-			pa = &PacketFormatExtensionsV1{PacketFormatAckV1: *pfa}
+		case *packetFormatAck:
+			pa = &packetFormatExtensions{packetFormatAck: *pfa}
+		case *packetFormatAckV1:
+			pa = &packetFormatExtensionsV1{packetFormatAckV1: *pfa}
 		}
 		pa.setExt(2)
 		pa.setExtNext(0)
@@ -1231,17 +1308,17 @@ func (s *Socket) sendKeepAlive() {
 }
 
 func sendRST(logger CompatibleLogger, sendToProc PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, connIDSend uint32, ackNum uint16, seqNum uint16, version int8) {
-	var p PacketHeader
+	var p packetHeader
 	if version == 0 {
-		p = &PacketFormat{}
+		p = &packetFormat{}
 	} else {
-		p = &PacketFormatV1{}
+		p = &packetFormatV1{}
 	}
 	p.setVersion(version)
 	p.setConnID(connIDSend)
 	p.setAckNumber(ackNum)
 	p.setSequenceNumber(seqNum)
-	p.setPacketType(STReset)
+	p.setPacketType(stReset)
 	p.setExt(0)
 	p.setWindowSize(0)
 
@@ -1269,7 +1346,7 @@ func (s *Socket) sendPacket(pkt *outgoingPacket) {
 
 	maxPacketSize := s.GetPacketSize()
 	if pkt.transmissions == 0 && maxSend < maxPacketSize {
-		assert(s.state == CSFinSent || int32(pkt.payload) <= s.sendQuota/100)
+		assert(s.state == csFinSent || int32(pkt.payload) <= s.sendQuota/100)
 		s.sendQuota = s.sendQuota - int32(pkt.payload*100)
 	}
 
@@ -1280,7 +1357,7 @@ func (s *Socket) sendPacket(pkt *outgoingPacket) {
 	pkt.transmissions++
 	s.sentAck()
 	bwType := PayloadBandwidth
-	if s.state == CSSynSent {
+	if s.state == csSynSent {
 		bwType = ConnectOverhead
 	} else if pkt.transmissions != 1 {
 		bwType = RetransmitOverhead
@@ -1382,7 +1459,7 @@ func (s *Socket) writeOutgoingPacket(payload int, flags packetFlag) {
 	maxPacketSize := s.GetPacketSize()
 	for {
 		assert(s.curWindowPackets < outgoingBufferMaxSize)
-		assert(flags == STData || flags == STFin)
+		assert(flags == stData || flags == stFin)
 
 		var added int
 		var pkt *outgoingPacket
@@ -1420,9 +1497,9 @@ func (s *Socket) writeOutgoingPacket(payload int, flags packetFlag) {
 			}
 			pkt.data = make([]byte, headerSize+added)
 			if s.version == 0 {
-				pkt.header = &PacketFormat{}
+				pkt.header = &packetFormat{}
 			} else {
-				pkt.header = &PacketFormatV1{}
+				pkt.header = &packetFormatV1{}
 			}
 			pkt.header.setVersion(s.version)
 		}
@@ -1503,15 +1580,15 @@ func (s *Socket) checkTimeouts() {
 	// if we don't use packet pacing, the writable event is triggered
 	// whenever the curWindow falls below the maxWindow, so we don't
 	// need this check then
-	if s.state == CSConnectedFull && s.isWritable(s.GetPacketSize()) {
-		s.state = CSConnected
+	if s.state == csConnectedFull && s.isWritable(s.GetPacketSize()) {
+		s.state = csConnected
 		s.logDebug("%p: Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
 			s, s.maxWindow, s.curWindow, s.sendQuota/100, s.GetPacketSize())
 		s.callbackTable.OnState(s.userdata, StateWritable)
 	}
 
 	switch s.state {
-	case CSSynSent, CSConnectedFull, CSConnected, CSFinSent:
+	case csSynSent, csConnectedFull, csConnected, csFinSent:
 		// Reset max window...
 		if int(currentMS)-int(s.zeroWindowTime) >= 0 && s.maxWindowUser == 0 {
 			s.maxWindowUser = packetSize
@@ -1530,14 +1607,14 @@ func (s *Socket) checkTimeouts() {
 
 			// Increase RTO
 			newTimeout := s.retransmitTimeout * 2
-			if newTimeout >= 30000 || (s.state == CSSynSent && newTimeout > 6000) {
+			if newTimeout >= 30000 || (s.state == csSynSent && newTimeout > 6000) {
 				// more than 30 seconds with no reply. kill it.
 				// if we haven't even connected yet, give up sooner. 6 seconds
 				// means 2 tries at the following timeouts: 3, 6 seconds
-				if s.state == CSFinSent {
-					s.state = CSDestroy
+				if s.state == csFinSent {
+					s.state = csDestroy
 				} else {
-					s.state = CSReset
+					s.state = csReset
 				}
 				s.callbackTable.OnError(s.userdata, syscall.ETIMEDOUT)
 				goto getout
@@ -1582,14 +1659,14 @@ func (s *Socket) checkTimeouts() {
 		}
 
 		// Mark the socket as writable
-		if s.state == CSConnectedFull && s.isWritable(s.GetPacketSize()) {
-			s.state = CSConnected
+		if s.state == csConnectedFull && s.isWritable(s.GetPacketSize()) {
+			s.state = csConnected
 			s.logDebug("%p: Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
 				s, s.maxWindow, s.curWindow, s.sendQuota/100, s.GetPacketSize())
 			s.callbackTable.OnState(s.userdata, StateWritable)
 		}
 
-		if s.state >= CSConnected && s.state <= CSFinSent {
+		if s.state >= csConnected && s.state <= csFinSent {
 			// Send acknowledgment packets periodically, or when the threshold is reached
 			if s.bytesSinceAck > delayedAckByteThreshold ||
 				int(currentMS)-int(s.ackTime) >= 0 {
@@ -1602,12 +1679,12 @@ func (s *Socket) checkTimeouts() {
 		}
 
 	// Close?
-	case CSGotFin, CSDestroyDelay:
+	case csGotFin, csDestroyDelay:
 		if uint(currentMS)-s.rtoTimeout >= 0 {
-			if s.state == CSDestroyDelay {
-				s.state = CSDestroy
+			if s.state == csDestroyDelay {
+				s.state = csDestroy
 			} else {
-				s.state = CSReset
+				s.state = csReset
 			}
 			if s.curWindowPackets > 0 && s.userdata != nil {
 				s.callbackTable.OnError(s.userdata, syscall.ECONNRESET)
@@ -1615,7 +1692,7 @@ func (s *Socket) checkTimeouts() {
 		}
 
 	// prevent compiler warning
-	case CSIdle, CSReset, CSDestroy:
+	case csIdle, csReset, csDestroy:
 	}
 
 getout:
@@ -1722,7 +1799,7 @@ func (s *Socket) selectiveAckBytes(base uint, mask []byte, minRTT *int64) int {
 	return ackedBytes
 }
 
-const MaxEAck = 128
+const maxEAck = 128
 
 func (s *Socket) selectiveAck(base uint16, mask []byte) {
 	if s.curWindowPackets == 0 {
@@ -1737,7 +1814,7 @@ func (s *Socket) selectiveAck(base uint16, mask []byte) {
 	// resends is a stack of sequence numbers we need to resend. Since we
 	// iterate in reverse over the acked packets, at the end, the top packets
 	// are the ones we want to resend
-	var resends [MaxEAck]int
+	var resends [maxEAck]int
 	nr := 0
 
 	s.logDebug("%p: Got EACK [%032b] base:%d", s, mask, base)
@@ -1821,9 +1898,9 @@ func (s *Socket) selectiveAck(base uint16, mask []byte) {
 
 			// resends is a stack, and we're mostly interested in the top of it
 			// if we're full, just throw away the lower half
-			if nr >= MaxEAck-2 {
-				copy(resends[0:(MaxEAck/2)], resends[(MaxEAck/2):])
-				nr -= MaxEAck / 2
+			if nr >= maxEAck-2 {
+				copy(resends[0:(maxEAck/2)], resends[(maxEAck/2):])
+				nr -= maxEAck / 2
 			}
 			resends[nr] = v
 			nr++
@@ -1996,8 +2073,8 @@ func registerRecvPacket(conn *Socket, length int) {
 	}
 }
 
-// returns the max number of bytes of payload the uTP
-// connection is allowed to send
+// GetPacketSize returns the max number of bytes of payload the µTP connection
+// is allowed to send at a time.
 func (s *Socket) GetPacketSize() int {
 	headerSize := s.getHeaderSize()
 
@@ -2010,9 +2087,10 @@ func (s *Socket) GetPacketSize() int {
 	return mtu - headerSize
 }
 
-// Process an incoming packet
+// processIncoming processes an incoming packet.
+//
 // syn is true if this is the first packet received. It will cut off parsing
-// as soon as the header is done
+// as soon as the header is done.
 func processIncoming(conn *Socket, packet []byte, syn bool) int {
 	registerRecvPacket(conn, len(packet))
 
@@ -2020,14 +2098,14 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 
 	conn.updateSendQuota()
 
-	var p PacketHeader
+	var p packetHeader
 	var err error
 	if conn.version == 0 {
-		var pf PacketFormat
+		var pf packetFormat
 		err = pf.decodeFromBytes(packet)
 		p = &pf
 	} else {
-		var pf1 PacketFormatV1
+		var pf1 packetFormatV1
 		err = pf1.decodeFromBytes(packet)
 		p = &pf1
 	}
@@ -2041,7 +2119,7 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 	pkAckNum := p.getAckNumber()
 	pkFlags := p.getPacketType()
 
-	if pkFlags >= STNumStates {
+	if pkFlags >= stNumStates {
 		return 0
 	}
 
@@ -2052,9 +2130,9 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 	receiptTime := getMicroseconds()
 
 	// RSTs are handled earlier, since the connID matches the send id not the recv id
-	assert(pkFlags != STReset)
+	assert(pkFlags != stReset)
 
-	// TODO: maybe send a STReset if we're in CSReset?
+	// TODO: maybe send a STReset if we're in csReset?
 
 	var selackPtr int
 
@@ -2097,7 +2175,7 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 		}
 	}
 
-	if conn.state == CSSynSent {
+	if conn.state == csSynSent {
 		// if this is a syn-ack, initialize our ackNum
 		// to match the sequence number we got from
 		// the other end
@@ -2119,7 +2197,7 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 
 	// Getting an invalid sequence number?
 	if seqNum >= reorderBufferMaxSize {
-		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != STState {
+		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != stState {
 			conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, delayedAckTimeThreshold)
 		}
 		conn.logDebug("    Got old Packet/Ack (%d/%d)=%d!", pkSeqNum, conn.ackNum, seqNum)
@@ -2269,16 +2347,16 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 
 		// Respond to connect message
 		// Switch to CONNECTED state.
-		if conn.state == CSSynSent {
-			conn.state = CSConnected
+		if conn.state == csSynSent {
+			conn.state = csConnected
 			conn.callbackTable.OnState(conn.userdata, StateConnect)
 
 			// We've sent a fin, and everything was ACKed (including the FIN),
 			// it's safe to destroy the socket. curWindowPackets == acks
 			// means that this packet acked all the remaining packets that
 			// were in-flight.
-		} else if conn.state == CSFinSent && conn.curWindowPackets == acks {
-			conn.state = CSDestroy
+		} else if conn.state == csFinSent && conn.curWindowPackets == acks {
+			conn.state = csDestroy
 		}
 
 		// Update fast resend counter
@@ -2368,27 +2446,27 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 
 	// In case the ack dropped the current window below
 	// the maxWindow size, Mark the socket as writable
-	if conn.state == CSConnectedFull && conn.isWritable(conn.GetPacketSize()) {
-		conn.state = CSConnected
+	if conn.state == csConnectedFull && conn.isWritable(conn.GetPacketSize()) {
+		conn.state = csConnected
 		conn.logDebug("%p: Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
 			conn, conn.maxWindow, conn.curWindow, conn.sendQuota/100, conn.GetPacketSize())
 		conn.callbackTable.OnState(conn.userdata, StateWritable)
 	}
 
-	if pkFlags == STState {
+	if pkFlags == stState {
 		// This is a state packet only.
 		return 0
 	}
 
 	// The connection is not in a state that can accept data?
-	if conn.state != CSConnected &&
-		conn.state != CSConnectedFull &&
-		conn.state != CSFinSent {
+	if conn.state != csConnected &&
+		conn.state != csConnectedFull &&
+		conn.state != csFinSent {
 		return 0
 	}
 
 	// Is this a finalize packet?
-	if pkFlags == STFin && !conn.gotFin {
+	if pkFlags == stFin && !conn.gotFin {
 		conn.logDebug("Got FIN eof_pkt:%d", pkSeqNum)
 		conn.gotFin = true
 		conn.eofPacket = pkSeqNum
@@ -2405,7 +2483,7 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 	// Getting an in-order packet?
 	if seqNum == 0 {
 		count := packetEnd - data
-		if count > 0 && conn.state != CSFinSent {
+		if count > 0 && conn.state != csFinSent {
 			conn.logDebug("%p: Got Data len:%d (rb:%d)", conn, count, conn.callbackTable.GetRBSize(conn.userdata))
 			// Post bytes to the upper layer
 			conn.callbackTable.OnRead(conn.userdata, packet[data:data+count])
@@ -2417,8 +2495,8 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 		// in the reorder buffer.
 		for {
 			if conn.gotFin && conn.eofPacket == conn.ackNum {
-				if conn.state != CSFinSent {
-					conn.state = CSGotFin
+				if conn.state != csFinSent {
+					conn.state = csGotFin
 					conn.rtoTimeout = uint(currentMS) + minUint(conn.rto*3, 60)
 
 					conn.logDebug("%p: Posting EOF", conn)
@@ -2449,7 +2527,7 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 				break
 			}
 			conn.inbuf.put(int(conn.ackNum)+1, nil)
-			if len(b) > 0 && conn.state != CSFinSent {
+			if len(b) > 0 && conn.state != csFinSent {
 				// Pass the bytes to the upper layer
 				conn.callbackTable.OnRead(conn.userdata, b)
 			}
@@ -2524,7 +2602,7 @@ func processIncoming(conn *Socket, packet []byte, syn bool) int {
 	// here instead of waiting for the timer to trigger
 	conn.logDebug("bytes_since_ack:%d ack_time:%d",
 		conn.bytesSinceAck, currentMS-conn.ackTime)
-	if conn.state == CSConnected || conn.state == CSConnectedFull {
+	if conn.state == csConnected || conn.state == csConnectedFull {
 		if conn.bytesSinceAck > delayedAckByteThreshold ||
 			(int)(currentMS-conn.ackTime) >= 0 {
 			conn.sendAck(false)
@@ -2538,7 +2616,7 @@ func detectVersion(packetBytes []byte) int8 {
 	ver := int8(packetBytes[0] & 0xf)
 	pType := packetFlag(packetBytes[0] >> 4)
 	ext := packetBytes[1]
-	if ver == 1 && pType < STNumStates && ext < 3 {
+	if ver == 1 && pType < stNumStates && ext < 3 {
 		return 1
 	}
 	return 0
@@ -2602,7 +2680,7 @@ func Create(logger CompatibleLogger, sendToCB PacketSendCallback, sendToUserdata
 	// we need to fit one packet in the window
 	// when we start the connection
 	conn.maxWindow = conn.GetPacketSize()
-	conn.state = CSIdle
+	conn.state = csIdle
 
 	conn.outbuf.mask = 15
 	conn.inbuf.mask = 15
@@ -2618,6 +2696,10 @@ func Create(logger CompatibleLogger, sendToCB PacketSendCallback, sendToUserdata
 	return conn
 }
 
+// SetCallbacks assigns a table of callbacks to this Socket. If any
+// callbacks were set previously, they are discarded.
+//
+// If this is not called before Connect
 // Setup the callbacks - must be done before connect or on incoming connection
 func (s *Socket) SetCallbacks(funcs *CallbackTable, userdata interface{}) {
 	if funcs == nil {
@@ -2645,7 +2727,17 @@ func (s *Socket) SetCallbacks(funcs *CallbackTable, userdata interface{}) {
 	s.userdata = userdata
 }
 
-// Valid options include SO_SNDBUF, SO_RCVBUF and SO_UTPVERSION
+// SetSockOpt sets certain socket options on this µTP socket. This is intended
+// to work similarly to the setsockopt() system call as used with UDP and TCP
+// sockets, but it is not really the same thing; this only affects send and
+// receive buffer sizes (SO_SNDBUF and SO_RCVBUF), and the µTP version to be
+// used with this Socket (SO_UTPVERSION).
+//
+// For incoming connections, the µTP version is determined by the initiating
+// host, so setting SO_UTPVERSION only has an effect for outgoing connections
+// before Connect() has been called.
+//
+// The return value indicates whether or not the setting was valid.
 func (s *Socket) SetSockOpt(opt, val int) bool {
 	switch opt {
 	case syscall.SO_SNDBUF:
@@ -2656,8 +2748,8 @@ func (s *Socket) SetSockOpt(opt, val int) bool {
 		s.optRecvBufferSize = val
 		return true
 	case SO_UTPVERSION:
-		assert(s.state == CSIdle)
-		if s.state != CSIdle {
+		assert(s.state == csIdle)
+		if s.state != csIdle {
 			// too late
 			return false
 		}
@@ -2677,13 +2769,22 @@ func (s *Socket) SetSockOpt(opt, val int) bool {
 	return false
 }
 
-// Try to connect to a specified host.
+// Connect initiates connection to the associated remote address. The remote
+// address was given when the Socket was created.
+//
+// Connect should only be called on outgoing connections; Socket objects
+// received by GotIncomingConnection callbacks are incoming connections and
+// do not need to be "connected".
+//
+// There is no return value indication of success here; the connection will not
+// be fully established until the Socket's OnStateChangeCallback is called with
+// state=StateConnect or state=StateWritable.
 func (s *Socket) Connect() {
-	assert(s.state == CSIdle)
+	assert(s.state == csIdle)
 	assert(s.curWindowPackets == 0)
 	assert(s.outbuf.get(int(s.seqNum)) == nil)
 
-	s.state = CSSynSent
+	s.state = csSynSent
 
 	currentMS = getMilliseconds()
 
@@ -2724,12 +2825,12 @@ func (s *Socket) Connect() {
 		data:          make([]byte, headerExtSize),
 	}
 
-	var pa PacketAckHeader
+	var pa packetAckHeader
 	if s.version == 0 {
-		pfe := &PacketFormatExtensions{}
+		pfe := &packetFormatExtensions{}
 		pa = pfe
 	} else {
-		pfe := &PacketFormatExtensionsV1{}
+		pfe := &packetFormatExtensionsV1{}
 		pa = pfe
 	}
 	pkt.header = pa
@@ -2739,7 +2840,7 @@ func (s *Socket) Connect() {
 	// instead of connIDSend.
 	pa.setConnID(s.connIDRecv)
 	pa.setExt(2)
-	pa.setPacketType(STSyn)
+	pa.setPacketType(stSyn)
 	pa.setWindowSize(s.lastReceiveWindow)
 	pa.setSequenceNumber(s.seqNum)
 	pa.setExtNext(0)
@@ -2757,9 +2858,20 @@ func (s *Socket) Connect() {
 	s.sendPacket(pkt)
 }
 
-// Process a UDP packet from the network. This will process a packet for an existing connection,
-// or create a new connection and call incomingCB. Returns true if the packet was processed
-// in some way, false if the packet did not appear to be uTP.
+// IsIncomingUTP passes a UDP packet into the µTP processing layer. If the
+// provided packet appears to be µTP traffic, it will be associated with the
+// appropriate existing connection or it will begin negotiation of a new
+// connection.
+//
+// The packet data should be passed in the 'buffer' parameter, and the source
+// address that sent the data should be given in 'toAddr'.
+//
+// The returned boolean value indicates whether the provided packet data did
+// indeed appear to be µTP traffic. If it was not, the caller might want to
+// do something else with it.
+//
+// If a new connection is being initiated, a new Socket object will be created
+// and passed to the provided GotIncomingConnection callback.
 func IsIncomingUTP(logger CompatibleLogger, incomingCB GotIncomingConnection, sendToCB PacketSendCallback, sendToUserdata interface{}, buffer []byte, toAddr *net.UDPAddr) bool {
 	if len(buffer) < minInt(sizeofPacketFormat, sizeofPacketFormatV1) {
 		logger.Debugf("recv %s len:%d too small", toAddr, len(buffer))
@@ -2767,11 +2879,11 @@ func IsIncomingUTP(logger CompatibleLogger, incomingCB GotIncomingConnection, se
 	}
 
 	version := detectVersion(buffer)
-	var ph PacketHeader
+	var ph packetHeader
 	if version == 0 {
-		ph = &PacketFormat{}
+		ph = &packetFormat{}
 	} else {
-		ph = &PacketFormatV1{}
+		ph = &packetFormatV1{}
 	}
 	err := ph.decodeFromBytes(buffer)
 	if err != nil {
@@ -2795,24 +2907,24 @@ func IsIncomingUTP(logger CompatibleLogger, incomingCB GotIncomingConnection, se
 			continue
 		}
 
-		if flags == STReset && (conn.connIDSend == id || conn.connIDRecv == id) {
+		if flags == stReset && (conn.connIDSend == id || conn.connIDRecv == id) {
 			conn.logDebug("%p: recv RST for existing connection", conn)
-			if conn.userdata == nil || conn.state == CSFinSent {
-				conn.state = CSDestroy
+			if conn.userdata == nil || conn.state == csFinSent {
+				conn.state = csDestroy
 			} else {
-				conn.state = CSReset
+				conn.state = csReset
 			}
 			if conn.userdata != nil {
 				conn.callbackTable.OnOverhead(conn.userdata, false, len(buffer)+conn.GetUDPOverhead(),
 					CloseOverhead)
 				socketErr := syscall.ECONNRESET
-				if conn.state == CSSynSent {
+				if conn.state == csSynSent {
 					socketErr = syscall.ECONNREFUSED
 				}
 				conn.callbackTable.OnError(conn.userdata, socketErr)
 			}
 			return true
-		} else if flags != STSyn && conn.connIDRecv == id {
+		} else if flags != stSyn && conn.connIDRecv == id {
 			logger.Debugf("%p: recv processing", conn)
 			read := processIncoming(conn, buffer, false)
 			if conn.userdata != nil {
@@ -2824,13 +2936,13 @@ func IsIncomingUTP(logger CompatibleLogger, incomingCB GotIncomingConnection, se
 		}
 	}
 
-	if flags == STReset {
+	if flags == stReset {
 		logger.Debugf("recv RST for unknown connection")
 		return true
 	}
 
 	seqNum := ph.getSequenceNumber()
-	if flags != STSyn {
+	if flags != stSyn {
 		for i := 0; i < globalRSTInfo.GetCount(); i++ {
 			if globalRSTInfo[i].connID != id {
 				continue
@@ -2880,7 +2992,7 @@ func IsIncomingUTP(logger CompatibleLogger, incomingCB GotIncomingConnection, se
 		conn.fastResendSeqNum = conn.seqNum
 
 		conn.SetSockOpt(SO_UTPVERSION, int(version))
-		conn.state = CSConnected
+		conn.state = csConnected
 
 		read := processIncoming(conn, buffer, true)
 
@@ -2903,7 +3015,11 @@ func IsIncomingUTP(logger CompatibleLogger, incomingCB GotIncomingConnection, se
 	return true
 }
 
-// Process an ICMP received UDP packet.
+// HandleICMP tells the µTP system to "process an ICMP received UDP packet."
+// Why was a UDP packet received with ICMP? I don't know. It looks like the
+// assumption here is that the ICMP packet is indicating an error with a sent
+// UDP packet, so I suppose it is expecting ICMP messages like "Time exceeded"
+// or "Destination unreachable".
 func HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool {
 	// Want the whole packet so we have connection ID
 	if len(buffer) < minInt(sizeofPacketFormat, sizeofPacketFormatV1) {
@@ -2911,11 +3027,11 @@ func HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool {
 	}
 
 	version := detectVersion(buffer)
-	var ph PacketHeader
+	var ph packetHeader
 	if version == 0 {
-		ph = &PacketFormat{}
+		ph = &packetFormat{}
 	} else {
-		ph = &PacketFormatV1{}
+		ph = &packetFormatV1{}
 	}
 	err := ph.decodeFromBytes(buffer)
 	if err != nil {
@@ -2928,16 +3044,16 @@ func HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool {
 		conn := globalUTPSockets[i]
 		if conn.addr.IP.Equal(toAddr.IP) && conn.addr.Port == toAddr.Port && conn.connIDRecv == id {
 			// Don't pass on errors for idle/closed connections
-			if conn.state != CSIdle {
-				if conn.userdata == nil || conn.state == CSFinSent {
+			if conn.state != csIdle {
+				if conn.userdata == nil || conn.state == csFinSent {
 					conn.logDebug("%p: icmp packet causing socket destruction", conn)
-					conn.state = CSDestroy
+					conn.state = csDestroy
 				} else {
-					conn.state = CSReset
+					conn.state = csReset
 				}
 				if conn.userdata != nil {
 					socketErr := syscall.ECONNRESET
-					if conn.state == CSSynSent {
+					if conn.state == csSynSent {
 						socketErr = syscall.ECONNREFUSED
 					}
 					conn.logDebug("%p: icmp packet causing error on socket:%d", conn, socketErr)
@@ -2950,9 +3066,30 @@ func HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool {
 	return false
 }
 
+// Write indicates that the specified amount of data is ready to be sent.
+//
+// The actual bytes to be sent are not passed to the socket at this point; the
+// Socket depends on the calling code to keep track of the data buffers until
+// it is ready to assemble packets. This minimizes the amount of copying that
+// must be done, and gives the caller a great deal of control over how data is
+// to be buffered.
+//
+// As much data as can be sent immediately (subject to window sizes) will be
+// collected with the Socket's OnWriteCallback and passed on in packetized form
+// to the Socket's PacketSendCallback before Write() returns. The caller may
+// need to call Write() again, when the Socket is able to write more, with the
+// new total amount of data ready to be sent. Subsequent calls to Write() are
+// not additive; each call provides a new _total_ amount of data ready to be
+// sent.
+//
+// The best way to know when the Socket is writable again appears to be by way
+// of its OnStateChangeCallback. That callback can be called with state=
+// StateWritable many times in succession. Therefore, it might be a good idea
+// to call Write() every time the OnStateChangeCallback is called with
+// StateWritable or StateConnected, if there actually is any data to send.
 func (s *Socket) Write(numBytes int) bool {
-	if s.state != CSConnected {
-		s.logDebug("%p: Write %d bytes = false (not CSConnected)", s, numBytes)
+	if s.state != csConnected {
+		s.logDebug("%p: Write %d bytes = false (not csConnected)", s, numBytes)
 		return false
 	}
 	param := numBytes
@@ -2980,16 +3117,19 @@ func (s *Socket) Write(numBytes int) bool {
 			s.maxWindow, s.maxWindowUser,
 			s.lastReceiveWindow, numToSend, s.sendQuota/100,
 			s.curWindowPackets)
-		s.writeOutgoingPacket(numToSend, STData)
+		s.writeOutgoingPacket(numToSend, stData)
 		numToSend = minInt(numBytes, maxPacketSize)
 	}
 
 	// mark the socket as not being writable.
-	s.state = CSConnectedFull
+	s.state = csConnectedFull
 	s.logDebug("%p: Write %d bytes = false", s, numBytes)
 	return false
 }
 
+// RBDrained notifies the Socket that the read buffer has been exhausted. This
+// prompts the sending of an immediate ACK if appropriate, so that more data
+// can arrive as soon as possible.
 func (s *Socket) RBDrained() {
 	rcvwin := s.getRcvWindow()
 
@@ -3003,6 +3143,13 @@ func (s *Socket) RBDrained() {
 	}
 }
 
+// CheckTimeouts checks for timeout expiration on all current µTP sockets, and
+// closes connections or causes state transitions as appropriate.
+//
+// It should be called by the governing code often enough that timeouts can be
+// noticed reasonably quickly. The ideal call frequency will depend on your
+// particular situation, but for development purposes, once every 50ms seems to
+// work well.
 func CheckTimeouts() {
 	currentMS = getMilliseconds()
 
@@ -3021,7 +3168,7 @@ func CheckTimeouts() {
 		conn.checkTimeouts()
 
 		// Check if the object was deleted
-		if conn.state == CSDestroy {
+		if conn.state == csDestroy {
 			conn.logDebug("%p: Destroying", conn)
 			removeFromTracking(conn)
 			i--
@@ -3029,43 +3176,47 @@ func CheckTimeouts() {
 	}
 }
 
+// GetPeerName returns the UDP address of the remote end of the connection.
 func (s *Socket) GetPeerName() *net.UDPAddr {
 	return s.addr
 }
 
+// GetDelays returns the currently measured delay values for the connection.
 func (s *Socket) GetDelays() (ours int32, theirs int32, age uint32) {
 	return int32(s.outHist.getValue()), int32(s.theirHist.getValue()), currentMS - s.lastMeasuredDelay
 }
 
+// GetGlobalStats returns a snapshot of the current GlobalStats counts.
 func GetGlobalStats() GlobalStats {
 	// copy
 	return globalStats
 }
 
-// Close the UTP socket.
+// Close closes the UTP socket.
+//
 // It is not valid to issue commands for this socket after it is closed.
 // This does not actually destroy the socket until outstanding data is sent, at which
 // point the socket will change to the StateDestroying state.
 func (s *Socket) Close() error {
-	if s.state == CSDestroyDelay || s.state == CSFinSent || s.state == CSDestroy {
+	if s.state == csDestroyDelay || s.state == csFinSent || s.state == csDestroy {
 		return fmt.Errorf("can not close socket in state %s", stateNames[s.state])
 	}
 
 	s.logDebug("%p: Close in state:%s", s, stateNames[s.state])
 
 	switch s.state {
-	case CSConnected, CSConnectedFull:
-		s.state = CSFinSent
-		s.writeOutgoingPacket(0, STFin)
+	case csConnected, csConnectedFull:
+		s.state = csFinSent
+		s.writeOutgoingPacket(0, stFin)
 
-	case CSSynSent:
+	case csSynSent:
 		s.rtoTimeout = uint(getMilliseconds()) + minUint(s.rto*2, 60)
 		fallthrough
-	case CSGotFin:
-		s.state = CSDestroyDelay
+	case csGotFin:
+		s.state = csDestroyDelay
 
 	default:
-		s.state = CSDestroy
+		s.state = csDestroy
 	}
 	return nil
 }

@@ -1,8 +1,11 @@
+// Copyright (c) 2021 Storj Labs, Inc.
+// See LICENSE for copying information.
+
 package utp
 
-type RSTInfoList []rstInfo
+type rstInfoList []rstInfo
 
-func (ril RSTInfoList) MoveUpLast(index int) bool {
+func (ril rstInfoList) MoveUpLast(index int) bool {
 	assert(index < len(ril))
 	c := len(ril) - 1
 	itemToMove := ril[c]
@@ -14,6 +17,6 @@ func (ril RSTInfoList) MoveUpLast(index int) bool {
 	return false
 }
 
-func (ril RSTInfoList) Compact() {}
-func (ril RSTInfoList) GetCount() int { return len(ril) }
-func (ril RSTInfoList) GetAlloc() int { return cap(ril) }
+func (ril rstInfoList) Compact()      {}
+func (ril rstInfoList) GetCount() int { return len(ril) }
+func (ril rstInfoList) GetAlloc() int { return cap(ril) }

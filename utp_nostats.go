@@ -1,3 +1,6 @@
+// Copyright (c) 2021 Storj Labs, Inc.
+// See LICENSE for copying information.
+
 //+build !utpdebug
 
 package utp

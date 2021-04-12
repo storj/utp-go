@@ -1,3 +1,6 @@
+// Copyright (C) 2021 Storj Labs, Inc.
+// See LICENSE for copying information.
+
 package utp
 
 import (
@@ -43,6 +46,8 @@ func getMilliseconds() uint32 {
 	return uint32(timeSinceLoad().Milliseconds())
 }
 
+// GetUDPMTU returns a best guess as to the MTU (maximum transmission unit) on
+// the network to which the specified address belongs (IPv4 or IPv6).
 func GetUDPMTU(addr *net.UDPAddr) uint16 {
 	// Since we don't know the local address of the interface,
 	// be conservative and assume all IPv6 connections are Teredo.
