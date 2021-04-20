@@ -86,7 +86,7 @@ func main() {
 		if err != nil {
 			logger.Fatalf("failed to run select: %v", err)
 		}
-		utp.CheckTimeouts()
+		fsr.sm.CheckTimeouts()
 		curTime := time.Now()
 		if curTime.After(lastTime.Add(1000 * time.Millisecond)) {
 			rate := float64((fsr.totalRecv-lastRecv)*1000) / float64(curTime.Sub(lastTime).Milliseconds())

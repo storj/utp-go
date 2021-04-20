@@ -47,6 +47,7 @@ type UDPOutgoing struct {
 }
 
 type UDPSocketManager struct {
+	*utp.SocketMultiplexer
 	socket               *net.UDPConn
 	outQueue             []UDPOutgoing
 	Logger               utp.CompatibleLogger
@@ -54,7 +55,10 @@ type UDPSocketManager struct {
 }
 
 func NewUDPSocketManager(logger utp.CompatibleLogger) *UDPSocketManager {
-	return &UDPSocketManager{Logger: logger}
+	return &UDPSocketManager{
+		SocketMultiplexer: utp.NewSocketMultiplexer(logger, nil),
+		Logger:            logger,
+	}
 }
 
 func (usm *UDPSocketManager) SetSocket(sock *net.UDPConn) {
@@ -139,7 +143,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 			}
 
 			// Lookup the right UTP socket that can handle this message
-			if !utp.IsIncomingUTP(usm.Logger, gotIncomingConnection, sendTo, usm, buffer[:receivedBytes], srcAddr) {
+			if !usm.IsIncomingUTP(gotIncomingConnection, sendTo, usm, buffer[:receivedBytes], srcAddr) {
 				usm.Logger.Debugf("received a non-µTP packet on UDP port from %s", srcAddr)
 			}
 			break

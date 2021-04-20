@@ -12,7 +12,7 @@ import (
 )
 
 // this is pretty dumb, but just for the sake of an easier port
-func assert(val bool) {
+func dumbAssert(val bool) {
 	if val {
 		return
 	}

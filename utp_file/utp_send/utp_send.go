@@ -90,7 +90,10 @@ func main() {
 		log.Fatalf("could not resolve destination %q: %v", dest, err)
 	}
 
-	s := utp.Create(logger, cbSendTo, sm, udpAddr)
+	s, err := sm.Create(cbSendTo, sm, udpAddr)
+	if err != nil {
+		log.Fatalf("could not connect to %s: %v", udpAddr.String(), err)
+	}
 	s.SetSockOpt(syscall.SO_SNDBUF, 100*300)
 	logger.Infof("creating socket %p", s)
 
@@ -117,7 +120,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to run Select(): %v", err)
 		}
-		utp.CheckTimeouts()
+		sm.CheckTimeouts()
 		curTime := time.Now()
 		if curTime.After(lastTime.Add(time.Second)) {
 			rate := float64(totalSent-lastSent) / curTime.Sub(lastTime).Seconds()

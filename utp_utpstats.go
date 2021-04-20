@@ -29,7 +29,7 @@ func (s *Stats) duplicateReceived() {
 
 func (s *Socket) checkInvariants() {
 	if s.reorderCount > 0 {
-		assert(s.inbuf.get(s.ackNum+1) == nil)
+		dumbAssert(s.inbuf.get(s.ackNum+1) == nil)
 	}
 
 	var outstandingBytes int
@@ -40,17 +40,17 @@ func (s *Socket) checkInvariants() {
 		}
 		outstandingBytes += pkt.payload
 	}
-	assert(outstandingBytes == curWindow)
+	dumbAssert(outstandingBytes == curWindow)
 }
 
 func (s *Socket) checkNoTransmissions() {
 	pkt := s.conn.outbuf.get(int(conn.seq_nr) - int(conn.cur_window_packets))
-	assert(pkt.transmissions == 0)
+	dumbAssert(pkt.transmissions == 0)
 }
 
 func (s *Socket) checkNoWindow() {
 	if s.conn.cur_window_packets == 0 {
-		assert(conn.curWindow == 0)
+		dumbAssert(conn.curWindow == 0)
 	}
 }
 

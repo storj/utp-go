@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
-	"time"
 )
 
 const (
@@ -31,20 +30,6 @@ const (
 	udpIPv6MTU   = ethernetMTU - ipv6HeaderSize - udpHeaderSize - greHeaderSize - pppoeHeaderSize - mppeHeaderSize - fudgeHeaderSize
 	udpTeredoMTU = teredoMTU - ipv6HeaderSize - udpHeaderSize
 )
-
-var loadTime = time.Now()
-
-func timeSinceLoad() time.Duration {
-	return time.Since(loadTime)
-}
-
-func getMicroseconds() uint64 {
-	return uint64(timeSinceLoad().Microseconds())
-}
-
-func getMilliseconds() uint32 {
-	return uint32(timeSinceLoad().Milliseconds())
-}
 
 // GetUDPMTU returns a best guess as to the MTU (maximum transmission unit) on
 // the network to which the specified address belongs (IPv4 or IPv6).
