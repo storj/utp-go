@@ -62,7 +62,7 @@ func randomUint32() uint32 {
 
 func getMaxPacketSize() int { return 1500 }
 
-func delaySample(addr *net.UDPAddr, sample_ms int) {}
+func delaySample(addr *net.UDPAddr, sampleMS int) {}
 
 func isIPv6(ip net.IP) bool {
 	return ip.To4() == nil

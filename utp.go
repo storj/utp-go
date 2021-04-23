@@ -548,17 +548,17 @@ func (pfa *packetFormatAckV1) encodedSize() int {
 	return sizeofPacketFormatAckV1
 }
 
-func (pf *packetFormatAckV1) encodeToBytes(b []byte) error {
+func (pfa *packetFormatAckV1) encodeToBytes(b []byte) error {
 	if len(b) < sizeofPacketFormatAckV1 {
 		return errors.New("buffer too small for object")
 	}
-	err := pf.packetFormatV1.encodeToBytes(b[:sizeofPacketFormatV1])
+	err := pfa.packetFormatV1.encodeToBytes(b[:sizeofPacketFormatV1])
 	if err != nil {
 		return err
 	}
-	b[sizeofPacketFormatV1] = pf.extNext
-	b[sizeofPacketFormatV1+1] = pf.extLen
-	for i, ackByte := range pf.acks {
+	b[sizeofPacketFormatV1] = pfa.extNext
+	b[sizeofPacketFormatV1+1] = pfa.extLen
+	for i, ackByte := range pfa.acks {
 		b[sizeofPacketFormatV1+2+i] = ackByte
 	}
 	return nil
@@ -643,12 +643,16 @@ var stateNames = []string{
 }
 
 type outgoingPacket struct {
-	length        int
+	// length should normally be equal to len(data)
+	length int
+	// payload will normally be equal to len(data)-headerSize
 	payload       int
-	timeSent      uint64 // microseconds
+	// timeSent gives a sent timestamp in microseconds
+	timeSent      uint64
 	transmissions uint32
 	needResend    bool
 	header        packetHeader
+	// data holds header data as well as payload
 	data          []byte
 }
 
@@ -1530,7 +1534,7 @@ func (s *Socket) writeOutgoingPacket(payload int, flags packetFlag, currentMS ui
 
 			// make the data buffer have enough room for the added data
 			if cap(pkt.data) < len(pkt.data)+added {
-				newBuf := make([]byte, len(pkt.data), len(pkt.data)+added)
+				newBuf := make([]byte, len(pkt.data)+added)
 				copy(newBuf[:len(pkt.data)], pkt.data)
 				pkt.data = newBuf
 			} else {
@@ -1817,9 +1821,14 @@ func (s *Socket) selectiveAckBytes(base uint, mask []byte, minRTT *int64) int {
 	}
 
 	ackedBytes := 0
-	bits := len(mask) * 8
+	bits := len(mask)*8 + 1
 
 	for {
+		bits--
+		if bits < -1 {
+			break
+		}
+
 		v := uint(int(base) + bits)
 
 		// ignore bits that haven't been sent yet
@@ -1836,15 +1845,11 @@ func (s *Socket) selectiveAckBytes(base uint, mask []byte, minRTT *int64) int {
 		}
 
 		// Count the number of segments that were successfully received past it.
-		if bits >= 0 && (mask[bits>>3]&(1<<(bits&7))) != 0 {
+		if bits >= 0 && bits < len(mask)*8 && (mask[bits>>3]&(1<<(bits&7))) != 0 {
 			dumbAssert(pkt.payload >= 0)
 			ackedBytes += pkt.payload
 			*minRTT = minInt64(*minRTT, int64(s.getMicroseconds()-pkt.timeSent))
 			continue
-		}
-		bits--
-		if bits < -1 {
-			break
 		}
 	}
 	return ackedBytes
@@ -1858,7 +1863,7 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 	}
 
 	// the range is inclusive [0, 31] bits
-	bits := len(mask)*8 - 1
+	bits := len(mask) * 8
 
 	count := 0
 
@@ -1870,6 +1875,11 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 
 	s.logDebug("%p: Got EACK [%032b] base:%d", s, mask, base)
 	for {
+		bits--
+		if bits < -1 {
+			break
+		}
+
 		// we're iterating over the bits from higher sequence numbers
 		// to lower (kind of in reverse order, which might not be very
 		// intuitive)
@@ -1959,11 +1969,6 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 		} else {
 			s.logDebug("%p: not resending %d count:%d dup_ack:%d fast_resend_seq_nr:%d",
 				s, v, count, s.duplicateAck, s.fastResendSeqNum)
-		}
-
-		bits--
-		if bits < -1 {
-			break
 		}
 	}
 
@@ -2980,6 +2985,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 				}
 				conn.callbackTable.OnError(conn.userdata, socketErr)
 			}
+			return true
 		} else if flags != stSyn && conn.connIDRecv == id {
 			mx.logger.Debugf("%p: recv processing", conn)
 			read := mx.processIncoming(conn, buffer, false, currentMS)
@@ -2988,8 +2994,8 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 					(len(buffer)-read)+conn.GetUDPOverhead(),
 					HeaderOverhead)
 			}
+			return true
 		}
-		return true
 	}
 
 	if flags == stReset {
