@@ -2,7 +2,7 @@
 // Copyright (c) 2010 BitTorrent, Inc.
 // See LICENSE for copying information.
 
-package utp
+package libutp
 
 import "net"
 
@@ -12,8 +12,8 @@ import "net"
 //
 // Example:
 //
-//     conn := utp.Create(logger, sendToCallback, sendToUserdata, destAddr)
-//     conn.SetSockopt(utp.SO_UTPVERSION, 1)  // µTP version 1
+//     conn := base.Create(logger, sendToCallback, sendToUserdata, destAddr)
+//     conn.SetSockopt(libutp.SO_UTPVERSION, 1)  // µTP version 1
 //
 const SO_UTPVERSION = 99
 
@@ -174,7 +174,7 @@ type Stats struct {
 
 // GlobalStats encapsulates statistics pertaining to all use of utp-go since
 // the library was loaded. A snapshot of these statistics can be accessed with
-// the utp.GetGlobalStats() function.
+// the libutp.GetGlobalStats() function.
 //
 // Statistics in this struct are kept as totals for each of 5 different size
 // buckets:

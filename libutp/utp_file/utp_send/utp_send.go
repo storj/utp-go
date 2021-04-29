@@ -13,12 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"storj.io/utp-go"
-	"storj.io/utp-go/utp_file"
-
-	"go.uber.org/zap"
+	"storj.io/utp-go/libutp"
+	"storj.io/utp-go/libutp/utp_file"
 )
 
 var (
@@ -99,11 +98,11 @@ func main() {
 
 	totalSent := 0
 	done := false
-	callbacks := utp.CallbackTable{
+	callbacks := libutp.CallbackTable{
 		OnRead:     cbRead,
 		OnWrite:    func(_ interface{}, data []byte) { fillBuffer(s, dataFile, data, &totalSent) },
 		GetRBSize:  cbGetRBSize,
-		OnState:    func(_ interface{}, state utp.State) { done = handleStateChange(s, state, dataFile, fileSize) },
+		OnState:    func(_ interface{}, state libutp.State) { done = handleStateChange(s, state, dataFile, fileSize) },
 		OnError:    func(_ interface{}, err error) { handleError(s, err) },
 		OnOverhead: nil,
 	}
@@ -145,14 +144,14 @@ func cbGetRBSize(userdata interface{}) int {
 	return 0
 }
 
-func handleError(conn *utp.Socket, err error) {
+func handleError(conn *libutp.Socket, err error) {
 	logger.Infof("socket error: %s", err)
 	if err := conn.Close(); err != nil {
 		logger.Errorf("could not close µTP socket: %v", err)
 	}
 }
 
-func fillBuffer(conn *utp.Socket, dataFile *os.File, data []byte, totalSent *int) {
+func fillBuffer(conn *libutp.Socket, dataFile *os.File, data []byte, totalSent *int) {
 	n, err := dataFile.Read(data)
 	if err != nil {
 		logger.Infof("failed to read from datafile: %v", err)
@@ -164,9 +163,9 @@ func fillBuffer(conn *utp.Socket, dataFile *os.File, data []byte, totalSent *int
 	}
 }
 
-func handleStateChange(conn *utp.Socket, state utp.State, file io.Seeker, totalSize int64) bool {
+func handleStateChange(conn *libutp.Socket, state libutp.State, file io.Seeker, totalSize int64) bool {
 	switch state {
-	case utp.StateConnect, utp.StateWritable:
+	case libutp.StateConnect, libutp.StateWritable:
 		curPos, _ := file.Seek(0, io.SeekCurrent)
 		if conn.Write(int(totalSize - curPos)) {
 			logger.Infof("upload complete")
@@ -174,7 +173,7 @@ func handleStateChange(conn *utp.Socket, state utp.State, file io.Seeker, totalS
 				logger.Errorf("could not close socket: %v", err)
 			}
 		}
-	case utp.StateDestroying:
+	case libutp.StateDestroying:
 		return true
 	}
 	return false

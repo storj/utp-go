@@ -14,8 +14,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"storj.io/utp-go"
-	"storj.io/utp-go/utp_file"
+	"storj.io/utp-go/libutp"
+	"storj.io/utp-go/libutp/utp_file"
 )
 
 var (
@@ -127,11 +127,11 @@ func newFileStreamReceiver(logger *zap.SugaredLogger, listenAddr string, fileDes
 	return fsr, nil
 }
 
-func (fsr *fileStreamReceiver) receiveNewConnection(s *utp.Socket) error {
+func (fsr *fileStreamReceiver) receiveNewConnection(s *libutp.Socket) error {
 	if fsr.connectionSeen {
 		return errors.New("no more connections allowed")
 	}
-	s.SetCallbacks(&utp.CallbackTable{
+	s.SetCallbacks(&libutp.CallbackTable{
 		OnRead:     fsr.doRead,
 		OnWrite:    fsr.doWrite,
 		GetRBSize:  fsr.doGetRBSize,
@@ -168,12 +168,12 @@ func (fsr *fileStreamReceiver) doGetRBSize(_ interface{}) int {
 	return 0
 }
 
-func (fsr *fileStreamReceiver) doStateChange(_ interface{}, state utp.State) {
+func (fsr *fileStreamReceiver) doStateChange(_ interface{}, state libutp.State) {
 	switch state {
-	case utp.StateEOF:
+	case libutp.StateEOF:
 		fsr.logger.Debugf("entered state EOF; done with transfer")
 		fsr.done = true
-	case utp.StateDestroying:
+	case libutp.StateDestroying:
 		fsr.logger.Debugf("entered state Destroying; done with transfer")
 		fsr.done = true
 	}

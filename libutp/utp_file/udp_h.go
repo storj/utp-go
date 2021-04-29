@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"storj.io/utp-go"
+	"storj.io/utp-go/libutp"
 )
 
 const MaxOutgoingQueueSize = 32
@@ -47,16 +47,16 @@ type UDPOutgoing struct {
 }
 
 type UDPSocketManager struct {
-	*utp.SocketMultiplexer
+	*libutp.SocketMultiplexer
 	socket               *net.UDPConn
 	outQueue             []UDPOutgoing
-	Logger               utp.CompatibleLogger
-	OnIncomingConnection func(*utp.Socket) error
+	Logger               libutp.CompatibleLogger
+	OnIncomingConnection func(*libutp.Socket) error
 }
 
-func NewUDPSocketManager(logger utp.CompatibleLogger) *UDPSocketManager {
+func NewUDPSocketManager(logger libutp.CompatibleLogger) *UDPSocketManager {
 	return &UDPSocketManager{
-		SocketMultiplexer: utp.NewSocketMultiplexer(logger, nil),
+		SocketMultiplexer: libutp.NewSocketMultiplexer(logger, nil),
 		Logger:            logger,
 	}
 }
@@ -161,7 +161,7 @@ func sendTo(userdata interface{}, p []byte, addr *net.UDPAddr) {
 }
 
 func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
-	if len(p) > int(utp.GetUDPMTU(addr)) {
+	if len(p) > int(libutp.GetUDPMTU(addr)) {
 		panic("given packet is too big")
 	}
 
@@ -195,7 +195,7 @@ func (usm *UDPSocketManager) Close() error {
 
 var NotAcceptingConnections = errors.New("not accepting connections")
 
-func gotIncomingConnection(userdata interface{}, socket *utp.Socket) {
+func gotIncomingConnection(userdata interface{}, socket *libutp.Socket) {
 	usm := userdata.(*UDPSocketManager)
 	usm.Logger.Debugf("incoming connection received from %v", socket.GetPeerName())
 	var err error

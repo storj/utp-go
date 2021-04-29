@@ -2,7 +2,7 @@
 // Copyright (c) 2010 BitTorrent, Inc.
 // See LICENSE for copying information.
 
-package utp
+package libutp
 
 import (
 	"encoding/binary"

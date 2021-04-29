@@ -3,7 +3,7 @@
 
 //+build !utpdebug
 
-package utp
+package libutp
 
 func (s *Stats) transmitted(length int)    {}
 func (s *Stats) packetLost()               {}

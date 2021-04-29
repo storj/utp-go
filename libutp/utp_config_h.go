@@ -1,7 +1,7 @@
 // Copyright (c) 2021 Storj Labs, Inc.
 // See LICENSE for copying information.
 
-package utp
+package libutp
 
 const (
 	congestionControlTarget = (100 * 1000) // us
@@ -23,7 +23,7 @@ const (
 // BandwidthType represents different classes of data which may be exchanged
 // in the course of µTP connections. Every byte in a µTP packet is classified
 // using one of these, and every byte that is not PayloadBandwidth is a form
-// of overhead. A utp.OnOverhead callback can be used with Socket objects to
+// of overhead. A base.OnOverhead callback can be used with Socket objects to
 // keep track of how much overhead of each type is getting used.
 type BandwidthType int
 
