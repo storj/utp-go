@@ -12,6 +12,8 @@ import (
 	"net"
 	"syscall"
 	"time"
+
+	"github.com/go-logr/logr"
 )
 
 const (
@@ -86,7 +88,7 @@ func divRoundUp(num, denom uint32) uint32 {
 // SocketMultiplexer coordinates µTP sockets that are sharing a single underlying
 // PacketConn.
 type SocketMultiplexer struct {
-	logger CompatibleLogger
+	logger logr.Logger
 
 	// this must return a positive and monotonically increasing time value. it
 	// is used to assign timestamps in microseconds and in milliseconds to
@@ -98,10 +100,13 @@ type SocketMultiplexer struct {
 }
 
 // NewSocketMultiplexer creates a new instance of SocketMultiplexer.
-func NewSocketMultiplexer(logger CompatibleLogger, packetTimeCallback func() time.Duration) *SocketMultiplexer {
+func NewSocketMultiplexer(logger logr.Logger, packetTimeCallback func() time.Duration) *SocketMultiplexer {
 	if packetTimeCallback == nil {
 		createTime := time.Now()
 		packetTimeCallback = func() time.Duration { return time.Since(createTime) }
+	}
+	if logger == nil {
+		logger = &logr.DiscardLogger{}
 	}
 	return &SocketMultiplexer{
 		logger:             logger,
@@ -646,14 +651,14 @@ type outgoingPacket struct {
 	// length should normally be equal to len(data)
 	length int
 	// payload will normally be equal to len(data)-headerSize
-	payload       int
+	payload int
 	// timeSent gives a sent timestamp in microseconds
 	timeSent      uint64
 	transmissions uint32
 	needResend    bool
 	header        packetHeader
 	// data holds header data as well as payload
-	data          []byte
+	data []byte
 }
 
 var globalStats GlobalStats
@@ -940,15 +945,6 @@ func (dh *delayHist) getValue() uint32 {
 	return value
 }
 
-// CompatibleLogger is an attempt at making a generic interface for loggers,
-// to which most major logger types can hopefully be adapted without much
-// effort.
-type CompatibleLogger interface {
-	Infof(template string, args ...interface{})
-	Debugf(template string, args ...interface{})
-	Errorf(template string, args ...interface{})
-}
-
 // Socket represents a µTP socket, which roughly corresponds to one connection
 // to an internet peer. It is important to distinguish µTP sockets from UDP
 // sockets; although µTP may be used over UDP, there is not a 1-1 correlation
@@ -1119,7 +1115,7 @@ type Socket struct {
 
 	packetTimeCallback func() time.Duration
 
-	logger CompatibleLogger
+	logger logr.Logger
 }
 
 func (s *Socket) getCurrentMS() uint32 {
@@ -1213,12 +1209,16 @@ func (s *Socket) GetOverhead() int {
 	return s.GetUDPOverhead() + s.getHeaderSize()
 }
 
+// for better compatibility with old code; it would probably be nice to
+// adapt the old code to use the logr interface instead
 func (s *Socket) logDebug(fmtString string, args ...interface{}) {
-	s.logger.Debugf(fmtString, args...)
+	s.logger.V(10).Info(fmt.Sprintf(fmtString, args...))
 }
 
+// for better compatibility with old code; it would probably be nice to
+// adapt the old code to use the logr interface instead
 func (s *Socket) logInfo(fmtString string, args ...interface{}) {
-	s.logger.Infof(fmtString, args...)
+	s.logger.V(1).Info(fmt.Sprintf(fmtString, args...))
 }
 
 func registerSentPacket(length int) {
@@ -1284,7 +1284,7 @@ func (s *Socket) sendData(b packetHeader, data []byte, bwType BandwidthType, cur
 	seqNum := b.getSequenceNumber()
 	ackNum := b.getAckNumber()
 
-	s.logDebug("%p: send %s len:%d id:%d timestamp:%d reply_micro:%d flags:%s seq_nr:%d ack_nr:%d", s, s.addr, len(data), s.connIDSend, packetTime, s.replyMicro, flagNames[flags], seqNum, ackNum)
+	s.logDebug("send len:%d id:%d timestamp:%d reply_micro:%d flags:%s seq_nr:%d ack_nr:%d", len(data), s.connIDSend, packetTime, s.replyMicro, flagNames[flags], seqNum, ackNum)
 
 	sendToAddr(s.sendToCB, s.sendToUserdata, data, s.addr)
 }
@@ -1327,16 +1327,16 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 		for i := 0; i < window; i++ {
 			if s.inbuf.get(int(s.ackNum)+i+2) != nil {
 				m |= 1 << i
-				s.logDebug("%p: EACK packet [%d]", s, int(s.ackNum)+i+2)
+				s.logDebug("EACK packet [%d]", int(s.ackNum)+i+2)
 			}
 		}
 		pa.setAcks(m)
-		s.logDebug("%p: Sending EACK %d [%d] bits:[%032b]", s, s.ackNum, s.connIDSend, m)
+		s.logDebug("Sending EACK %d [%d] bits:[%032b]", s.ackNum, s.connIDSend, m)
 	} else if synack {
 		// we only send "extensions" in response to SYN
 		// and the reorder count is 0 in that state
 
-		s.logDebug("%p: Sending ACK %d [%d] with extension bits", s, s.ackNum, s.connIDSend)
+		s.logDebug("Sending ACK %d [%d] with extension bits", s.ackNum, s.connIDSend)
 		switch pfa := pa.(type) {
 		case *packetFormatAck:
 			pa = &packetFormatExtensions{packetFormatAck: *pfa}
@@ -1347,7 +1347,7 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 		pa.setExtNext(0)
 		pa.setExtLen(8)
 	} else {
-		s.logDebug("%p: Sending ACK %d [%d]", s, s.ackNum, s.connIDSend)
+		s.logDebug("Sending ACK %d [%d]", s.ackNum, s.connIDSend)
 	}
 
 	s.sentAck(currentMS)
@@ -1357,12 +1357,12 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 
 func (s *Socket) sendKeepAlive(currentMS uint32) {
 	s.ackNum--
-	s.logDebug("%p: Sending KeepAlive ACK %d [%d]", s, s.ackNum, s.connIDSend)
+	s.logDebug("Sending KeepAlive ACK %d [%d]", s.ackNum, s.connIDSend)
 	s.sendAck(false, currentMS)
 	s.ackNum++
 }
 
-func sendRST(logger CompatibleLogger, sendToProc PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, connIDSend uint32, ackNum uint16, seqNum uint16, version int8) {
+func sendRST(logger logr.Logger, sendToProc PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, connIDSend uint32, ackNum uint16, seqNum uint16, version int8) {
 	var p packetHeader
 	if version == 0 {
 		p = &packetFormat{}
@@ -1383,8 +1383,8 @@ func sendRST(logger CompatibleLogger, sendToProc PacketSendCallback, sendToUserd
 		panic(err)
 	}
 
-	logger.Debugf("%s: Sending RST id:%d seq_nr:%d ack_nr:%d", addr, connIDSend, seqNum, ackNum)
-	logger.Debugf("send %s len:%d id:%d", addr, len(packetData), connIDSend)
+	logger.V(10).Info("sending RST", "id", connIDSend, "seq_nr", seqNum, "ack_nr", ackNum)
+	logger.V(10).Info("send", "len", len(packetData), "id", connIDSend)
 	sendToAddr(sendToProc, sendToUserdata, packetData, addr)
 }
 
@@ -1611,8 +1611,8 @@ func (s *Socket) updateSendQuota(currentMS uint32) {
 		add = maxWindow
 	}
 	s.sendQuota += add
-	//	us.logDebug("%p: Socket::updateSendQuota dt:%d rtt:%d max_window:%d quota:%d",
-	//		us, dt, rtt, maxWindow, sendQuota / 100)
+	//	s.logDebug("Socket::updateSendQuota dt:%d rtt:%d max_window:%d quota:%d",
+	//		dt, rtt, maxWindow, sendQuota / 100)
 }
 
 func (s *Socket) checkTimeouts(currentMS uint32) {
@@ -1621,8 +1621,8 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 	// this invariant should always be true
 	dumbAssert(s.curWindowPackets == 0 || s.outbuf.get(int(s.seqNum)-int(s.curWindowPackets)) != nil)
 
-	s.logDebug("%p: CheckTimeouts timeout:%d max_window:%d cur_window:%d quota:%d state:%s cur_window_packets:%d bytes_since_ack:%d ack_time:%d",
-		s, int(s.rtoTimeout)-int(currentMS), s.maxWindow, s.curWindow,
+	s.logDebug("CheckTimeouts timeout:%d max_window:%d cur_window:%d quota:%d state:%s cur_window_packets:%d bytes_since_ack:%d ack_time:%d",
+		int(s.rtoTimeout)-int(currentMS), s.maxWindow, s.curWindow,
 		s.sendQuota/100, stateNames[s.state], s.curWindowPackets,
 		s.bytesSinceAck, currentMS-s.ackTime)
 
@@ -1637,8 +1637,8 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 	// need this check then
 	if s.state == csConnectedFull && s.isWritable(s.GetPacketSize(), currentMS) {
 		s.state = csConnected
-		s.logDebug("%p: Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
-			s, s.maxWindow, s.curWindow, s.sendQuota/100, s.GetPacketSize())
+		s.logDebug("Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
+			s.maxWindow, s.curWindow, s.sendQuota/100, s.GetPacketSize())
 		s.callbackTable.OnState(s.userdata, StateWritable)
 	}
 
@@ -1697,8 +1697,8 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 			}
 
 			// used in parse_log.py
-			s.logInfo("%p: Packet timeout. Resend. seq_nr:%d. timeout:%d max_window:%d",
-				s, s.seqNum-s.curWindowPackets, s.retransmitTimeout, s.maxWindow)
+			s.logInfo("Packet timeout. Resend. seq_nr:%d. timeout:%d max_window:%d",
+				s.seqNum-s.curWindowPackets, s.retransmitTimeout, s.maxWindow)
 
 			s.fastTimeout = true
 			s.timeoutSeqNum = s.seqNum
@@ -1716,8 +1716,8 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 		// Mark the socket as writable
 		if s.state == csConnectedFull && s.isWritable(s.GetPacketSize(), currentMS) {
 			s.state = csConnected
-			s.logDebug("%p: Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
-				s, s.maxWindow, s.curWindow, s.sendQuota/100, s.GetPacketSize())
+			s.logDebug("Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
+				s.maxWindow, s.curWindow, s.sendQuota/100, s.GetPacketSize())
 			s.callbackTable.OnState(s.userdata, StateWritable)
 		}
 
@@ -1764,19 +1764,19 @@ func (s *Socket) ackPacket(seq uint16, currentMS uint32) int {
 
 	// the packet has already been acked (or not sent)
 	if pkt == nil {
-		s.logDebug("%p: got ack for:%d (already acked, or never sent)", s, seq)
+		s.logDebug("got ack for:%d (already acked, or never sent)", seq)
 		return 1
 	}
 
 	// can't ack packets that haven't been sent yet!
 	if pkt.transmissions == 0 {
-		s.logDebug("%p: got ack for:%d (never sent, pkt_size:%d need_resend:%v)",
-			s, seq, pkt.payload, pkt.needResend)
+		s.logDebug("got ack for:%d (never sent, pkt_size:%d need_resend:%v)",
+			seq, pkt.payload, pkt.needResend)
 		return 2
 	}
 
-	s.logDebug("%p: got ack for:%d (pkt_size:%d need_resend:%v)",
-		s, seq, pkt.payload, pkt.needResend)
+	s.logDebug("got ack for:%d (pkt_size:%d need_resend:%v)",
+		seq, pkt.payload, pkt.needResend)
 
 	s.outbuf.put(int(seq), nil)
 
@@ -1800,8 +1800,8 @@ func (s *Socket) ackPacket(seq uint16, currentMS uint32) int {
 			s.rtoHist.addSample(ertt, currentMS)
 		}
 		s.rto = maxUint(s.rtt+s.rttVariance*4, 500)
-		s.logDebug("%p: rtt:%d avg:%d var:%d rto:%d",
-			s, ertt, s.rtt, s.rttVariance, s.rto)
+		s.logDebug("rtt:%d avg:%d var:%d rto:%d",
+			ertt, s.rtt, s.rttVariance, s.rto)
 	}
 	s.retransmitTimeout = s.rto
 	s.rtoTimeout = uint(currentMS) + s.rto
@@ -1873,7 +1873,7 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 	var resends [maxEAck]int
 	nr := 0
 
-	s.logDebug("%p: Got EACK [%032b] base:%d", s, mask, base)
+	s.logDebug("Got EACK [%032b] base:%d", mask, base)
 	for {
 		bits--
 		if bits < -1 {
@@ -1937,7 +1937,7 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 				transmissions = pkt.transmissions
 				msg = "(not sent yet?)"
 			}
-			s.logDebug("%p: skipping %d. pkt:%08x transmissions:%d %s", s, v, pkt, transmissions, msg)
+			s.logDebug("skipping %d. pkt:%p transmissions:%d %s", v, pkt, transmissions, msg)
 			continue
 		}
 
@@ -1965,10 +1965,10 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 			}
 			resends[nr] = v
 			nr++
-			s.logDebug("%p: no ack for %d", s, v)
+			s.logDebug("no ack for %d", v)
 		} else {
-			s.logDebug("%p: not resending %d count:%d dup_ack:%d fast_resend_seq_nr:%d",
-				s, v, count, s.duplicateAck, s.fastResendSeqNum)
+			s.logDebug("not resending %d count:%d dup_ack:%d fast_resend_seq_nr:%d",
+				v, count, s.duplicateAck, s.fastResendSeqNum)
 		}
 	}
 
@@ -1980,8 +1980,8 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 		resends[nr] = (int(base) - 1) & ackNumberMask
 		nr++
 	} else {
-		s.logDebug("%p: not resending %d count:%d dup_ack:%d fast_resend_seq_nr:%d",
-			s, base-1, count, s.duplicateAck, s.fastResendSeqNum)
+		s.logDebug("not resending %d count:%d dup_ack:%d fast_resend_seq_nr:%d",
+			base-1, count, s.duplicateAck, s.fastResendSeqNum)
 	}
 
 	backOff := false
@@ -2002,7 +2002,7 @@ func (s *Socket) selectiveAck(base uint16, mask []byte, currentMS uint32) {
 		}
 
 		// used in parse_log.py
-		s.logInfo("%p: Packet %d lost. Resending", s, v)
+		s.logInfo("Packet %d lost. Resending", v)
 
 		// On Loss
 		backOff = true
@@ -2098,8 +2098,8 @@ func (s *Socket) applyLEDBATControl(bytesAcked int, actualDelay uint32, minRTT i
 	if s.rtoHist.delayBase != 0 {
 		showDelayBase = s.rtoHist.delayBase
 	}
-	s.logDebug("%p: actual_delay:%d our_delay:%d their_delay:%d off_target:%d max_window:%d delay_base:%d delay_sum:%d target_delay:%d acked_bytes:%d cur_window:%d scaled_gain:%f rtt:%d rate:%d quota:%d wnduser:%d rto:%d timeout:%d get_microseconds:%d cur_window_packets:%d packet_size:%d their_delay_base:%d their_actual_delay:%d",
-		s, actualDelay, ourDelay/1000, s.theirHist.getValue()/1000,
+	s.logDebug("actual_delay:%d our_delay:%d their_delay:%d off_target:%d max_window:%d delay_base:%d delay_sum:%d target_delay:%d acked_bytes:%d cur_window:%d scaled_gain:%f rtt:%d rate:%d quota:%d wnduser:%d rto:%d timeout:%d get_microseconds:%d cur_window_packets:%d packet_size:%d their_delay_base:%d their_actual_delay:%d",
+		actualDelay, ourDelay/1000, s.theirHist.getValue()/1000,
 		int(offTarget)/1000, s.maxWindow, s.outHist.delayBase,
 		(uint32(ourDelay)+s.theirHist.getValue())/1000, target/1000, bytesAcked,
 		s.curWindow-bytesAcked, scaledGain, s.rtt,
@@ -2178,8 +2178,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		return 0
 	}
 
-	conn.logDebug("%p: Got %s. seq_nr:%d ack_nr:%d state:%s version:%d timestamp:%d reply_micro:%d",
-		conn, flagNames[pkFlags], pkSeqNum, pkAckNum, stateNames[conn.state], conn.version, p.getPacketTime(), p.getReplyMicro())
+	conn.logDebug("Got %s. seq_nr:%d ack_nr:%d state:%s version:%d timestamp:%d reply_micro:%d",
+		flagNames[pkFlags], pkSeqNum, pkAckNum, stateNames[conn.state], conn.version, p.getPacketTime(), p.getReplyMicro())
 
 	// mark receipt time
 	receiptTime := conn.getMicroseconds()
@@ -2195,7 +2195,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// Data pointer
 	data := conn.getHeaderSize()
 	if conn.getHeaderSize() > packetEnd {
-		conn.logDebug("%p: Invalid packet size (less than header size)", conn)
+		conn.logDebug("Invalid packet size (less than header size)")
 		return 0
 	}
 	// Skip the extension headers
@@ -2206,7 +2206,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			data += 2
 
 			if (packetEnd-data) < 0 || (packetEnd-data) < int(packet[data-1]) {
-				conn.logDebug("%p: Invalid len of extensions", conn)
+				conn.logDebug("Invalid len of extensions")
 				return 0
 			}
 
@@ -2215,11 +2215,11 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 				selackPtr = data
 			case 2: // extension bits
 				if packet[data-1] != 8 {
-					conn.logDebug("%p: Invalid len of extension bits header", conn)
+					conn.logDebug("Invalid len of extension bits header")
 					return 0
 				}
 				copy(conn.extensions[:], packet[data:data+8])
-				conn.logDebug("%p: got extension bits:%x", conn, conn.extensions[:])
+				conn.logDebug("got extension bits:%x", conn.extensions[:])
 			}
 			extension = int8(packet[data-2])
 			data += int(packet[data-1])
@@ -2312,8 +2312,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			packet[selackPtr:selackPtr+selackLen], &minRTT)
 	}
 
-	conn.logDebug("%p: acks:%d acked_bytes:%d seq_nr:%d cur_window:%d cur_window_packets:%d relative_seqnr:%d max_window:%d min_rtt:%d rtt:%d",
-		conn, acks, ackedBytes, conn.seqNum, conn.curWindow, conn.curWindowPackets,
+	conn.logDebug("acks:%d acked_bytes:%d seq_nr:%d cur_window:%d cur_window_packets:%d relative_seqnr:%d max_window:%d min_rtt:%d rtt:%d",
+		acks, ackedBytes, conn.seqNum, conn.curWindow, conn.curWindowPackets,
 		seqNum, conn.maxWindow, minRTT/1000, conn.rtt)
 
 	packetTime := p.getPacketTime()
@@ -2419,7 +2419,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			conn.fastResendSeqNum = pkAckNum + 1
 		}
 
-		conn.logDebug("%p: fast_resend_seq_nr:%d", conn, conn.fastResendSeqNum)
+		conn.logDebug("fast_resend_seq_nr:%d", conn.fastResendSeqNum)
 
 		for i := uint16(0); i < acks; i++ {
 			ackStatus := conn.ackPacket(conn.seqNum-conn.curWindowPackets, currentMS)
@@ -2477,7 +2477,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 				// to not allow another fast resend on it again
 				pkt := conn.outbuf.get(int(conn.seqNum) - int(conn.curWindowPackets))
 				if pkt != nil && pkt.transmissions > 0 {
-					conn.logDebug("%p: Packet %d fast timeout-retry.", conn, conn.seqNum-conn.curWindowPackets)
+					conn.logDebug("Packet %d fast timeout-retry.", conn.seqNum-conn.curWindowPackets)
 					conn.stats.fastTransmitted()
 					conn.fastResendSeqNum++
 					conn.sendPacket(pkt, currentMS)
@@ -2495,16 +2495,16 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// this invariant should always be true
 	dumbAssert(conn.curWindowPackets == 0 || conn.outbuf.get(int(conn.seqNum)-int(conn.curWindowPackets)) != nil)
 
-	conn.logDebug("%p: acks:%d acked_bytes:%d seq_nr:%d cur_window:%d cur_window_packets:%d quota:%d",
-		conn, acks, ackedBytes, conn.seqNum, conn.curWindow, conn.curWindowPackets,
+	conn.logDebug("acks:%d acked_bytes:%d seq_nr:%d cur_window:%d cur_window_packets:%d quota:%d",
+		acks, ackedBytes, conn.seqNum, conn.curWindow, conn.curWindowPackets,
 		conn.sendQuota/100)
 
 	// In case the ack dropped the current window below
 	// the maxWindow size, Mark the socket as writable
 	if conn.state == csConnectedFull && conn.isWritable(conn.GetPacketSize(), currentMS) {
 		conn.state = csConnected
-		conn.logDebug("%p: Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
-			conn, conn.maxWindow, conn.curWindow, conn.sendQuota/100, conn.GetPacketSize())
+		conn.logDebug("Socket writable. max_window:%d cur_window:%d quota:%d packet_size:%d",
+			conn.maxWindow, conn.curWindow, conn.sendQuota/100, conn.GetPacketSize())
 		conn.callbackTable.OnState(conn.userdata, StateWritable)
 	}
 
@@ -2539,7 +2539,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	if seqNum == 0 {
 		count := packetEnd - data
 		if count > 0 && conn.state != csFinSent {
-			conn.logDebug("%p: Got Data len:%d (rb:%d)", conn, count, conn.callbackTable.GetRBSize(conn.userdata))
+			conn.logDebug("Got Data len:%d (rb:%d)", count, conn.callbackTable.GetRBSize(conn.userdata))
 			// Post bytes to the upper layer
 			conn.callbackTable.OnRead(conn.userdata, packet[data:data+count])
 		}
@@ -2554,7 +2554,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 					conn.state = csGotFin
 					conn.rtoTimeout = uint(currentMS) + minUint(conn.rto*3, 60)
 
-					conn.logDebug("%p: Posting EOF", conn)
+					conn.logDebug("Posting EOF")
 					conn.callbackTable.OnState(conn.userdata, StateEOF)
 				}
 
@@ -2603,8 +2603,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		// is lower than the sequence number of the packet we just received
 		// something is wrong.
 		if conn.gotFin && pkSeqNum > conn.eofPacket {
-			conn.logDebug("%p: Got an invalid packet sequence number, past EOF reorder_count:%d len:%d (rb:%d)",
-				conn, conn.reorderCount, packetEnd-data, conn.callbackTable.GetRBSize(conn.userdata))
+			conn.logDebug("Got an invalid packet sequence number, past EOF reorder_count:%d len:%d (rb:%d)",
+				conn.reorderCount, packetEnd-data, conn.callbackTable.GetRBSize(conn.userdata))
 			return 0
 		}
 
@@ -2612,8 +2612,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		// one, just drop it. We can't allocate buffer space in
 		// the inbuf entirely based on untrusted input
 		if seqNum > 0x3ff {
-			conn.logDebug("%p: Got an invalid packet sequence number, too far off reorder_count:%d len:%d (rb:%d)",
-				conn, conn.reorderCount, packetEnd-data, conn.callbackTable.GetRBSize(conn.userdata))
+			conn.logDebug("Got an invalid packet sequence number, too far off reorder_count:%d len:%d (rb:%d)",
+				conn.reorderCount, packetEnd-data, conn.callbackTable.GetRBSize(conn.userdata))
 			return 0
 		}
 
@@ -2646,8 +2646,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		conn.inbuf.put(int(pkSeqNum), mem)
 		conn.reorderCount++
 
-		conn.logDebug("%p: Got out of order data reorder_count:%d len:%d (rb:%d)",
-			conn, conn.reorderCount, packetEnd-data, conn.callbackTable.GetRBSize(conn.userdata))
+		conn.logDebug("Got out of order data reorder_count:%d len:%d (rb:%d)",
+			conn.reorderCount, packetEnd-data, conn.callbackTable.GetRBSize(conn.userdata))
 
 		// Setup so the partial ACK message will get sent immediately.
 		conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, 1)
@@ -2678,7 +2678,7 @@ func detectVersion(packetBytes []byte) int8 {
 }
 
 func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
-	conn.logDebug("%p: Killing socket", conn)
+	conn.logDebug("Killing socket")
 
 	foundConn, ok := mx.socketMap[conn.addrString]
 	if ok {
@@ -2694,7 +2694,8 @@ func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 
 // Create a µTP socket for communication with a peer at the given address.
 func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr) (*Socket, error) {
-	conn := &Socket{logger: mx.logger, packetTimeCallback: mx.packetTimeCallback}
+	sockLogger := mx.logger.WithName("utp-socket").WithValues("raddr", addr)
+	conn := &Socket{logger: sockLogger, packetTimeCallback: mx.packetTimeCallback}
 
 	currentMS := conn.getCurrentMS()
 
@@ -2753,9 +2754,6 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 		mx.socketMap[conn.addrString] = conn
 	}
 
-	if conn != nil {
-		conn.logDebug("%p: Create", conn)
-	}
 	return conn, err
 }
 
@@ -2831,6 +2829,15 @@ func (s *Socket) SetSockOpt(opt, val int) bool {
 	return false
 }
 
+// SetLogger sets a new logger for the socket. If logger is nil, a no-op
+// logger will be used.
+func (s *Socket) SetLogger(logger logr.Logger) {
+	if logger == nil {
+		logger = &logr.DiscardLogger{}
+	}
+	s.logger = logger
+}
+
 // Connect initiates connection to the associated remote address. The remote
 // address was given when the Socket was created.
 //
@@ -2860,8 +2867,8 @@ func (s *Socket) Connect() {
 	}
 
 	// used in parse_log.py
-	s.logInfo("%p: UTP_Connect conn_seed:%d packet_size:%d (B) target_delay:%d (ms) delay_history:%d delay_base_history:%d (minutes)",
-		s, connSeed, packetSize, congestionControlTarget/1000,
+	s.logInfo("UTP_Connect conn_seed:%d packet_size:%d (B) target_delay:%d (ms) delay_history:%d delay_base_history:%d (minutes)",
+		connSeed, packetSize, congestionControlTarget/1000,
 		curDelaySize, delayBaseHistory)
 
 	// Setup initial timeout timer.
@@ -2908,8 +2915,8 @@ func (s *Socket) Connect() {
 	pa.setExtNext(0)
 	pa.setExtLen(8)
 
-	//conn.logDebug("%p: Sending connect %s:%d [%d].",
-	//		 conn, conn.addrIP, conn.addrPort, connSeed)
+	//conn.logDebug("Sending connect %s:%d [%d].",
+	//		 conn.addrIP, conn.addrPort, connSeed)
 
 	// Remember the message in the outgoing queue.
 	s.outbuf.ensureSize(int(s.seqNum), int(s.curWindowPackets))
@@ -2936,7 +2943,7 @@ func (s *Socket) Connect() {
 // and passed to the provided GotIncomingConnection callback.
 func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sendToCB PacketSendCallback, sendToUserdata interface{}, buffer []byte, toAddr *net.UDPAddr) bool {
 	if len(buffer) < minInt(sizeofPacketFormat, sizeofPacketFormatV1) {
-		mx.logger.Debugf("recv %s len:%d too small", toAddr, len(buffer))
+		mx.logger.V(10).Info("recv packet too small", "raddr", toAddr, "len", len(buffer))
 		return false
 	}
 	currentMS := mx.getCurrentMS()
@@ -2950,17 +2957,16 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 	err := ph.decodeFromBytes(buffer)
 	if err != nil {
-		mx.logger.Debugf("recv %s len:%d too small for apparent format version %d", toAddr, len(buffer), version)
+		mx.logger.V(10).Info("recv packet too small for apparent format version", "raddr", toAddr, "len", len(buffer), "utp-version", version)
 		return false
 	}
 	id := ph.getConnID()
 
-	mx.logger.Debugf("recv %s len:%d id:%d", toAddr, len(buffer), id)
-	mx.logger.Debugf("recv id:%d seq_nr:%d ack_nr:%d", id, ph.getSequenceNumber(), ph.getAckNumber())
+	mx.logger.V(10).Info("recv", "raddr", toAddr, "len", len(buffer), "id", id, "seq_nr", ph.getSequenceNumber(), "ack_nr", ph.getAckNumber())
 
 	flags := ph.getPacketType()
 	for _, conn := range mx.socketMap {
-		//us.logDebug("Examining Socket %s:%d for %s:%d and (seed:%d s:%d r:%d) for %d",
+		//conn.logDebug("Examining Socket %s:%d for %s:%d and (seed:%d s:%d r:%d) for %d",
 		//		conn.addrIP, conn.addrPort, toIP, toPort, conn.connSeed, conn.connIDSend, conn.connIDRecv, id)
 		if conn.addr.Port != toAddr.Port {
 			continue
@@ -2970,7 +2976,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		}
 
 		if flags == stReset && (conn.connIDSend == id || conn.connIDRecv == id) {
-			conn.logDebug("%p: recv RST for existing connection", conn)
+			conn.logDebug("recv RST for existing connection")
 			if conn.userdata == nil || conn.state == csFinSent {
 				conn.state = csDestroy
 			} else {
@@ -2987,7 +2993,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 			}
 			return true
 		} else if flags != stSyn && conn.connIDRecv == id {
-			mx.logger.Debugf("%p: recv processing", conn)
+			mx.logger.V(10).Info("recv processing", "raddr", conn.addrString)
 			read := mx.processIncoming(conn, buffer, false, currentMS)
 			if conn.userdata != nil {
 				conn.callbackTable.OnOverhead(conn.userdata, false,
@@ -2999,7 +3005,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 
 	if flags == stReset {
-		mx.logger.Debugf("recv RST for unknown connection")
+		mx.logger.V(10).Info("recv RST for unknown connection")
 		return true
 	}
 
@@ -3019,14 +3025,14 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 				continue
 			}
 			mx.rstInfo[i].timestamp = mx.getCurrentMS()
-			mx.logger.Debugf("recv not sending RST to non-SYN (stored)")
+			mx.logger.V(10).Info("recv not sending RST to non-SYN (stored)")
 			return true
 		}
 		if len(mx.rstInfo) > rstInfoLimit {
-			mx.logger.Debugf("recv not sending RST to non-SYN (limit at %d stored)", len(mx.rstInfo))
+			mx.logger.V(10).Info("recv not sending RST to non-SYN (limit stored)", "limit", len(mx.rstInfo))
 			return true
 		}
-		mx.logger.Debugf("recv send RST to non-SYN (%d stored)", len(mx.rstInfo))
+		mx.logger.V(10).Info("recv send RST to non-SYN", "stored", len(mx.rstInfo))
 		mx.rstInfo = append(mx.rstInfo, rstInfo{})
 		r := &mx.rstInfo[len(mx.rstInfo)-1]
 		r.addr = toAddr
@@ -3039,12 +3045,12 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 
 	if incomingCB != nil {
-		mx.logger.Debugf("Incoming connection from %s uTP version:%d", toAddr, version)
+		mx.logger.V(10).Info("Incoming connection", "raddr", toAddr, "utp-version", version)
 
 		// Create a new UTP socket to handle this new connection
 		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr)
 		if err != nil {
-			mx.logger.Errorf("synchronous connections from %s?", toAddr.String())
+			mx.logger.V(10).Error(nil, "synchronous connections?", "raddr", toAddr)
 			return true
 		}
 		// Need to track this value to be able to detect duplicate CONNECTs
@@ -3062,7 +3068,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 
 		read := mx.processIncoming(conn, buffer, true, currentMS)
 
-		conn.logDebug("%p: recv send connect ACK", conn)
+		conn.logDebug("recv send connect ACK")
 		conn.sendAck(true, currentMS)
 
 		incomingCB(sendToUserdata, conn)
@@ -3111,7 +3117,7 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 			// Don't pass on errors for idle/closed connections
 			if conn.state != csIdle {
 				if conn.userdata == nil || conn.state == csFinSent {
-					conn.logDebug("%p: icmp packet causing socket destruction", conn)
+					conn.logDebug("icmp packet causing socket destruction")
 					conn.state = csDestroy
 				} else {
 					conn.state = csReset
@@ -3121,7 +3127,7 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 					if conn.state == csSynSent {
 						socketErr = syscall.ECONNREFUSED
 					}
-					conn.logDebug("%p: icmp packet causing error on socket:%d", conn, socketErr)
+					conn.logDebug("icmp packet causing error on socket:%d", socketErr)
 					conn.callbackTable.OnError(conn.userdata, socketErr)
 				}
 			}
@@ -3154,7 +3160,7 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 // StateWritable or StateConnected, if there actually is any data to send.
 func (s *Socket) Write(numBytes int) bool {
 	if s.state != csConnected {
-		s.logDebug("%p: Write %d bytes = false (not csConnected)", s, numBytes)
+		s.logDebug("Write %d bytes = false (not csConnected)", numBytes)
 		return false
 	}
 	param := numBytes
@@ -3171,13 +3177,13 @@ func (s *Socket) Write(numBytes int) bool {
 		// Also add it to the outgoing of packets that have been sent but not ACKed.
 
 		if numToSend == 0 {
-			s.logDebug("%p: Write %d bytes = true", s, param)
+			s.logDebug("Write %d bytes = true", param)
 			return true
 		}
 		numBytes -= numToSend
 
-		s.logDebug("%p: Sending packet. seq_nr:%d ack_nr:%d wnd:%d/%d/%d rcv_win:%d size:%d quota:%d cur_window_packets:%d",
-			s, s.seqNum, s.ackNum,
+		s.logDebug("Sending packet. seq_nr:%d ack_nr:%d wnd:%d/%d/%d rcv_win:%d size:%d quota:%d cur_window_packets:%d",
+			s.seqNum, s.ackNum,
 			s.curWindow+numToSend,
 			s.maxWindow, s.maxWindowUser,
 			s.lastReceiveWindow, numToSend, s.sendQuota/100,
@@ -3188,7 +3194,7 @@ func (s *Socket) Write(numBytes int) bool {
 
 	// mark the socket as not being writable.
 	s.state = csConnectedFull
-	s.logDebug("%p: Write %d bytes = false", s, numBytes)
+	s.logDebug("Write %d bytes = false", numBytes)
 	return false
 }
 
@@ -3234,7 +3240,7 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 		conn.checkTimeouts(currentMS)
 		// Check if the object was deleted
 		if conn.state == csDestroy {
-			conn.logDebug("%p: Destroying", conn)
+			conn.logDebug("Destroying")
 			mx.removeFromTracking(conn)
 		}
 	}
@@ -3270,7 +3276,7 @@ func (s *Socket) Close() error {
 	if s.state == csDestroyDelay || s.state == csFinSent || s.state == csDestroy {
 		return fmt.Errorf("can not close socket in state %s", stateNames[s.state])
 	}
-	s.logDebug("%p: Close in state:%s", s, stateNames[s.state])
+	s.logDebug("Close in state:%s", stateNames[s.state])
 
 	switch s.state {
 	case csConnected, csConnectedFull:

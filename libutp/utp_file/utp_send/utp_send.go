@@ -7,12 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"syscall"
 	"time"
 
+	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	logger *zap.SugaredLogger
+	logger *zap.Logger
 
 	debug = flag.Bool("debug", false, "Enable debug logging")
 )
@@ -50,51 +50,51 @@ func main() {
 	}
 	logConfig.Encoding = "console"
 	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	plainLogger, err := logConfig.Build()
+	var err error
+	logger, err = logConfig.Build()
 	if err != nil {
 		panic(err)
 	}
-	logger = plainLogger.Sugar()
 
-	logger.Infof("connecting to %s", dest)
-	logger.Infof("sending %q", fileName)
+	logger.Info("connecting", zap.String("dest-addr", dest))
+	logger.Info("sending", zap.String("source-file", fileName))
 
 	dataFile, err := os.Open(fileName)
 	if err != nil {
-		log.Fatalf("failed to open source: %v", err)
+		logger.Fatal("failed to open source", zap.Error(err))
 	}
 	defer func() { _ = dataFile.Close() }()
 	fileSize, err := dataFile.Seek(0, io.SeekEnd)
 	if err != nil {
-		log.Fatalf("could not determine size of input size: %v", err)
+		logger.Fatal("could not determine size of input size", zap.Error(err))
 	}
 	_, err = dataFile.Seek(0, io.SeekStart)
 	if err != nil {
-		log.Fatalf("could not seek to beginning of file: %v", err)
+		logger.Fatal("could not seek to beginning of file", zap.Error(err))
 	}
 	if fileSize == 0 {
-		log.Fatalf("file is 0 bytes")
+		logger.Fatal("file is 0 bytes")
 	}
 
-	sm := utp_file.NewUDPSocketManager(logger)
+	sm := utp_file.NewUDPSocketManager(zapr.NewLogger(logger))
 
 	udpSock, err := utp_file.MakeSocket(":0")
 	if err != nil {
-		log.Fatalf("failed to make socket: %v", err)
+		logger.Fatal("failed to make socket", zap.Error(err))
 	}
 	sm.SetSocket(udpSock)
 
 	udpAddr, err := net.ResolveUDPAddr("udp", dest)
 	if err != nil {
-		log.Fatalf("could not resolve destination %q: %v", dest, err)
+		logger.Fatal("could not resolve destination", zap.String("dest", dest), zap.Error(err))
 	}
 
 	s, err := sm.Create(cbSendTo, sm, udpAddr)
 	if err != nil {
-		log.Fatalf("could not connect to %s: %v", udpAddr.String(), err)
+		logger.Fatal("could not connect", zap.Stringer("dest-addr", udpAddr), zap.Error(err))
 	}
 	s.SetSockOpt(syscall.SO_SNDBUF, 100*300)
-	logger.Infof("creating socket %p", s)
+	logger.Sugar().Infof("creating socket %p", s)
 
 	totalSent := 0
 	done := false
@@ -108,7 +108,7 @@ func main() {
 	}
 	s.SetCallbacks(&callbacks, s)
 
-	logger.Infof("connecting socket %p", s)
+	logger.Sugar().Infof("connecting socket %p", s)
 	s.Connect()
 
 	lastSent := 0
@@ -117,7 +117,7 @@ func main() {
 	for !done {
 		err := sm.Select(50000 * time.Microsecond)
 		if err != nil {
-			log.Fatalf("failed to run Select(): %v", err)
+			logger.Fatal("failed to run Select()", zap.Error(err))
 		}
 		sm.CheckTimeouts()
 		curTime := time.Now()
@@ -136,7 +136,7 @@ func cbSendTo(userdata interface{}, p []byte, addr *net.UDPAddr) {
 }
 
 func cbRead(userdata interface{}, data []byte) {
-	logger.Infof("got data from peer? %x", data)
+	logger.Info("got data from peer?", zap.ByteString("data", data))
 }
 
 func cbGetRBSize(userdata interface{}) int {
@@ -145,18 +145,18 @@ func cbGetRBSize(userdata interface{}) int {
 }
 
 func handleError(conn *libutp.Socket, err error) {
-	logger.Infof("socket error: %s", err)
+	logger.Error("socket error", zap.Error(err))
 	if err := conn.Close(); err != nil {
-		logger.Errorf("could not close µTP socket: %v", err)
+		logger.Error("could not close µTP socket", zap.Error(err))
 	}
 }
 
 func fillBuffer(conn *libutp.Socket, dataFile *os.File, data []byte, totalSent *int) {
 	n, err := dataFile.Read(data)
 	if err != nil {
-		logger.Infof("failed to read from datafile: %v", err)
+		logger.Error("failed to read from datafile", zap.Error(err))
 		if err := conn.Close(); err != nil {
-			logger.Errorf("could not close µTP socket: %v", err)
+			logger.Error("could not close µTP socket", zap.Error(err))
 		}
 	} else {
 		*totalSent += n
@@ -168,9 +168,9 @@ func handleStateChange(conn *libutp.Socket, state libutp.State, file io.Seeker, 
 	case libutp.StateConnect, libutp.StateWritable:
 		curPos, _ := file.Seek(0, io.SeekCurrent)
 		if conn.Write(int(totalSize - curPos)) {
-			logger.Infof("upload complete")
+			logger.Info("upload complete")
 			if err := conn.Close(); err != nil {
-				logger.Errorf("could not close socket: %v", err)
+				logger.Error("could not close socket", zap.Error(err))
 			}
 		}
 	case libutp.StateDestroying:

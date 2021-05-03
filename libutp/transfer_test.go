@@ -5,7 +5,6 @@
 package libutp
 
 import (
-	"fmt"
 	"math/rand"
 	"net"
 	"sort"
@@ -13,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 )
 
 type testFlag int
@@ -76,23 +77,6 @@ func TestUTPV1TransferWithHeavySimulatedPacketLossAndReorder(t *testing.T) {
 
 func TestUTPV1TransferWithSimulatedPacketReorder(t *testing.T) {
 	testTransfer(t, useUTPv1|simulatePacketReorder)
-}
-
-type testLogger struct {
-	t            testing.TB
-	errorsLogged []string
-}
-
-func (tl *testLogger) Infof(tmpl string, args ...interface{}) {
-	tl.t.Logf(tmpl, args...)
-}
-
-func (tl *testLogger) Debugf(string, ...interface{}) {}
-
-func (tl *testLogger) Errorf(tmpl string, args ...interface{}) {
-	msg := fmt.Sprintf(tmpl, args...)
-	tl.errorsLogged = append(tl.errorsLogged, msg)
-	tl.t.Logf(msg)
 }
 
 func testTransfer(t testing.TB, flags testFlag) {
@@ -201,9 +185,9 @@ type testScenario struct {
 }
 
 func newTestScenario(t testing.TB) *testScenario {
+	logger := zapr.NewLogger(zaptest.NewLogger(t))
 	scenario := &testScenario{}
-	scenario.mx = NewSocketMultiplexer(&testLogger{t: t}, nil)
-	scenario.mx.SetPacketTimeCallback(scenario.getTime)
+	scenario.mx = NewSocketMultiplexer(logger, scenario.getTime)
 
 	scenario.sendManager = udpManager{
 		mx:       scenario.mx,

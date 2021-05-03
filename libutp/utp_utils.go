@@ -67,9 +67,3 @@ func delaySample(addr *net.UDPAddr, sampleMS int) {}
 func isIPv6(ip net.IP) bool {
 	return ip.To4() == nil
 }
-
-type NoopLogger struct {}
-
-func (*NoopLogger) Infof(string, ...interface{}) {}
-func (*NoopLogger) Debugf(string, ...interface{}) {}
-func (*NoopLogger) Errorf(string, ...interface{}) {}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -19,7 +20,7 @@ import (
 )
 
 var (
-	logger *zap.SugaredLogger
+	logger *zap.Logger
 
 	debug = flag.Bool("debug", false, "Enable debug logging")
 )
@@ -51,30 +52,30 @@ func main() {
 	}
 	logConfig.Encoding = "console"
 	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	plainLogger, err := logConfig.Build()
+	var err error
+	logger, err = logConfig.Build()
 	if err != nil {
 		panic(err)
 	}
-	logger = plainLogger.Sugar()
 
-	logger.Infof("listening on %s", listenAddr)
-	logger.Infof("saving to %s", fileName)
+	logger.Info("listening", zap.String("address", listenAddr))
+	logger.Info("saving to file", zap.String("dest-file", fileName))
 
 	destFile, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE, 0664)
 	if err != nil {
-		logger.Fatalf("could not open destination file for writing: %v", err)
+		logger.Fatal("could not open destination file for writing", zap.Error(err))
 	}
 	defer func() {
 		err := destFile.Close()
 		if err != nil {
-			logger.Fatalf("failed to close destination file: %v", err)
+			logger.Fatal("failed to close destination file", zap.Error(err))
 		}
 	}()
 
 	fsr, err := newFileStreamReceiver(logger, listenAddr, destFile)
 	defer func() {
 		if err := fsr.Close(); err != nil {
-			logger.Errorf("failed to close fileStreamReceiver: %v", err)
+			logger.Error("failed to close fileStreamReceiver", zap.Error(err))
 		}
 	}()
 
@@ -84,7 +85,7 @@ func main() {
 	for !fsr.done {
 		err := fsr.sm.Select(50000 * time.Microsecond)
 		if err != nil {
-			logger.Fatalf("failed to run select: %v", err)
+			logger.Fatal("failed to run select", zap.Error(err))
 		}
 		fsr.sm.CheckTimeouts()
 		curTime := time.Now()
@@ -101,20 +102,20 @@ func main() {
 
 type fileStreamReceiver struct {
 	sm             *utp_file.UDPSocketManager
-	logger         *zap.SugaredLogger
+	logger         *zap.Logger
 	fileDest       io.Writer
 	totalRecv      int
 	connectionSeen bool
 	done           bool
 }
 
-func newFileStreamReceiver(logger *zap.SugaredLogger, listenAddr string, fileDest io.Writer) (*fileStreamReceiver, error) {
+func newFileStreamReceiver(logger *zap.Logger, listenAddr string, fileDest io.Writer) (*fileStreamReceiver, error) {
 	sock, err := utp_file.MakeSocket(listenAddr)
 	if err != nil {
 		err = fmt.Errorf("could not listen on %q: %w", listenAddr, err)
 		return nil, err
 	}
-	sm := utp_file.NewUDPSocketManager(logger)
+	sm := utp_file.NewUDPSocketManager(zapr.NewLogger(logger))
 	sm.SetSocket(sock)
 
 	fsr := &fileStreamReceiver{
@@ -146,12 +147,12 @@ func (fsr *fileStreamReceiver) receiveNewConnection(s *libutp.Socket) error {
 func (fsr *fileStreamReceiver) doRead(_ interface{}, b []byte) {
 	n, err := fsr.fileDest.Write(b)
 	if err != nil {
-		fsr.logger.Errorf("failed to write to destination file: %v", err)
+		fsr.logger.Error("failed to write to destination file", zap.Error(err))
 		fsr.done = true
 		return
 	}
 	if n < len(b) {
-		fsr.logger.Errorf("could not write full packet to destination file! %d<%d", n, len(b))
+		fsr.logger.Error("could not write full packet to destination file!", zap.Int("written", n), zap.Int("full-len", len(b)))
 		fsr.done = true
 		return
 	}
@@ -159,7 +160,7 @@ func (fsr *fileStreamReceiver) doRead(_ interface{}, b []byte) {
 }
 
 func (fsr *fileStreamReceiver) doWrite(_ interface{}, _ []byte) {
-	fsr.logger.Errorf("got doWrite call on receiving side, which is not expected")
+	fsr.logger.Error("got doWrite call on receiving side, which is not expected")
 	fsr.done = true
 }
 
@@ -171,16 +172,16 @@ func (fsr *fileStreamReceiver) doGetRBSize(_ interface{}) int {
 func (fsr *fileStreamReceiver) doStateChange(_ interface{}, state libutp.State) {
 	switch state {
 	case libutp.StateEOF:
-		fsr.logger.Debugf("entered state EOF; done with transfer")
+		fsr.logger.Debug("entered state EOF; done with transfer")
 		fsr.done = true
 	case libutp.StateDestroying:
-		fsr.logger.Debugf("entered state Destroying; done with transfer")
+		fsr.logger.Debug("entered state Destroying; done with transfer")
 		fsr.done = true
 	}
 }
 
 func (fsr *fileStreamReceiver) handleError(_ interface{}, err error) {
-	fsr.logger.Errorf("got socket error: %v", err)
+	fsr.logger.Error("got socket error", zap.Error(err))
 	fsr.done = true
 }
 

@@ -5,14 +5,19 @@
 package utp
 
 import (
+	"context"
 	"errors"
-	"fmt"
-	"log"
+	"io"
 	"net"
+	"os"
+	"runtime/pprof"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
+
+	"storj.io/utp-go/buffers"
 	"storj.io/utp-go/libutp"
 )
 
@@ -23,57 +28,45 @@ const (
 	writeBufferSize = 200000
 )
 
-//var noopLogger = libutp.NoopLogger{}
-var noopLogger = DumbLogger{prefix: "utp"}
+var noopLogger = logr.DiscardLogger{}
 
-type DumbLogger struct {
-	prefix string
-}
+type Addr net.UDPAddr
 
-func (d *DumbLogger) Infof(tmpl string, args ...interface{}) {
-	log.Printf("[INFO : %s] %s", d.prefix, fmt.Sprintf(tmpl, args...))
-}
-
-func (d *DumbLogger) Debugf(tmpl string, args ...interface{}) {
-	log.Printf("[DEBUG : %s] %s", d.prefix, fmt.Sprintf(tmpl, args...))
-}
-
-func (d *DumbLogger) Errorf(tmpl string, args ...interface{}) {
-	log.Printf("[ERROR : %s] %s", d.prefix, fmt.Sprintf(tmpl, args...))
-}
+func (a *Addr) Network() string { return "utp" }
+func (a *Addr) String() string  { return (*net.UDPAddr)(a).String() }
 
 type Conn struct {
 	utpSocket
+
+	logger logr.Logger
 
 	baseConn *libutp.Socket
 
 	// set to true if the socket will close once the write buffer is empty
 	willClose bool
 
-	// set to true once the socket starts closing down
-	closing bool
+	// closed when Close() is called
+	closeChan chan struct{}
+
+	// closed when baseConn has entered StateDestroying
+	baseConnDestroyed chan struct{}
 
 	// readBuffer tracks data that has been read on a particular Conn, but
 	// not yet consumed by the application.
-	//
-	// When new data is added to the buffer, the state condition variable will
-	// be signaled, to wake up any goroutines waiting for read data. This
-	// should not be necessary when removing data from the buffer, because the
-	// µTP receive window should provide the backpressure when the read buffer
-	// gets full enough.
-	readBuffer []byte
+	readBuffer *buffers.SyncCircularBuffer
 
 	// writeBuffer tracks data that needs to be sent on this Conn, which is
 	// not yet ingested by µTP.
-	//
-	// When new data is added to the buffer, a send should also be done on the
-	// corresponding socketManager's wantsToWrite channel, to wake up the
-	// managing goroutine.
-	//
-	// When data is removed from the buffer for sending, the state condition
-	// variable should be signaled to wake up any goroutines waiting to add to
-	// the buffer because it was full.
-	writeBuffer []byte
+	writeBuffer *buffers.SyncCircularBuffer
+
+	readDeadline  time.Time
+	writeDeadline time.Time
+
+	// Set to true while waiting for a connection to complete (got
+	// state=StateConnect). The connectChan channel will be closed once this
+	// is set.
+	connecting  bool
+	connectChan chan struct{}
 }
 
 type Listener struct {
@@ -84,7 +77,7 @@ type Listener struct {
 
 // utpSocket is shared functionality between Conn and Listener.
 type utpSocket struct {
-	localAddr net.UDPAddr
+	localAddr *net.UDPAddr
 
 	// manager is shared by all sockets using the same local address
 	// (for outgoing connections, only the one connection, but for incoming
@@ -93,31 +86,20 @@ type utpSocket struct {
 	// cleaned up entirely when the last related socket is closed.
 	manager *socketManager
 
-	// changes to baseConnClosed, opError, closing, connecting, or other state
-	// variables in Conn or Listener (i.e., the read and write buffers, etc)
-	// should all be protected with this lock.
+	// changes to encounteredError, manager, or other state variables in Conn
+	// or Listener should all be protected with this lock. If it must be
+	// acquired at the same time as manager.baseConnLock, the
+	// manager.baseConnLock must be acquired first.
 	stateLock sync.Mutex
-	stateCond sync.Cond
-	// Set when baseConn has been entirely closed (got state=StateDestroying).
-	// A broadcast on stateCond will be issued when this is set.
-	baseConnClosed bool
-	// Set when Close() has been called on this instance.
-	closing bool
+
 	// Once set, all further Write/Read operations should fail with this error.
-	// Broadcasts on stateCond, readBuffer.cond, and writeBuffer.cond will be
-	// issued when this is set.
-	opError error
-	// Set to true while waiting for a connection to complete (got
-	// state=StateConnect). A broadcast on stateCond will be issued when this
-	// is set.
-	connecting bool
+	encounteredError error
 }
 
 func Dial(network string, address string) (net.Conn, error) {
 	switch network {
 	case "utp", "utp4", "utp6":
-		udpNetwork := "udp" + network[3:]
-		rAddr, err := net.ResolveUDPAddr(udpNetwork, address)
+		rAddr, err := ResolveUTPAddr(network, address)
 		if err != nil {
 			return nil, err
 		}
@@ -126,26 +108,41 @@ func Dial(network string, address string) (net.Conn, error) {
 	return net.Dial(network, address)
 }
 
-func DialUTP(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
-	manager, err := newSocketManager(network, laddr, raddr)
+func DialUTP(network string, laddr, raddr *Addr) (*Conn, error) {
+	return DialUTPOptions(network, laddr, raddr)
+}
+
+func DialUTPOptions(network string, laddr, raddr *Addr, options ...ListenOption) (*Conn, error) {
+	var logger logr.Logger = &noopLogger
+	for _, opt := range options {
+		opt.apply(&logger)
+	}
+	logger = logger.WithValues("laddr", laddr, "raddr", raddr)
+	manager, err := newSocketManager(logger, network, (*net.UDPAddr)(laddr), (*net.UDPAddr)(raddr))
 	if err != nil {
 		return nil, err
 	}
 	localAddr := manager.LocalAddr().(*net.UDPAddr)
+	// in case local addr interface and/or port has been clarified
+	logger = logger.WithValues("laddr", localAddr)
 
 	utpConn := &Conn{
 		utpSocket: utpSocket{
-			localAddr:  *localAddr,
-			manager:    manager,
-			connecting: true,
+			localAddr: localAddr,
+			manager:   manager,
 		},
-		readBuffer:  make([]byte, 0, readBufferSize),
-		writeBuffer: make([]byte, 0, writeBufferSize),
+		logger:            logger.WithName("utp-conn").WithValues("dir", "out"),
+		connecting:        true,
+		connectChan:       make(chan struct{}),
+		closeChan:         make(chan struct{}),
+		baseConnDestroyed: make(chan struct{}),
+		readBuffer:        buffers.NewSyncBuffer(readBufferSize),
+		writeBuffer:       buffers.NewSyncBuffer(writeBufferSize),
 	}
-	utpConn.stateCond.L = &utpConn.stateLock
+	logger.V(10).Info("creating outgoing socket", "raddr", raddr)
 	// thread-safe here, because no other goroutines could have a handle to
 	// this mx yet.
-	utpConn.baseConn, err = manager.mx.Create(packetSendCallback, manager, raddr)
+	utpConn.baseConn, err = manager.mx.Create(packetSendCallback, manager, (*net.UDPAddr)(raddr))
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +153,7 @@ func DialUTP(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 		OnState:   onStateCallback,
 		OnError:   onErrorCallback,
 	}, utpConn)
+	utpConn.baseConn.SetLogger(logger.WithName("utp-socket"))
 
 	manager.start()
 
@@ -164,16 +162,16 @@ func DialUTP(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 		// concurrency protection
 		manager.baseConnLock.Lock()
 		defer manager.baseConnLock.Unlock()
+		logger.V(10).Info("initating libutp-level Connect()")
 		utpConn.baseConn.Connect()
 	}()
 
-	utpConn.stateLock.Lock()
-	for utpConn.connecting {
-		utpConn.stateCond.Wait()
-	}
-	err = utpConn.opError
-	utpConn.stateLock.Unlock()
+	// wait until connection is complete
+	<-utpConn.connectChan
 
+	utpConn.stateLock.Lock()
+	err = utpConn.encounteredError
+	utpConn.stateLock.Unlock()
 	if err != nil {
 		_ = utpConn.Close()
 		return nil, err
@@ -184,7 +182,7 @@ func DialUTP(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 func Listen(network string, addr string) (net.Listener, error) {
 	switch network {
 	case "utp", "utp4", "utp6":
-		udpAddr, err := net.ResolveUDPAddr("udp"+network[3:], addr)
+		udpAddr, err := ResolveUTPAddr(network, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -193,144 +191,306 @@ func Listen(network string, addr string) (net.Listener, error) {
 	return net.Listen(network, addr)
 }
 
-func ListenUTP(network string, localAddr *net.UDPAddr) (*Listener, error) {
-	manager, err := newSocketManager(network, localAddr, nil)
+func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
+	return ListenUTPOptions(network, localAddr)
+}
+
+func ListenUTPOptions(network string, localAddr *Addr, options ...ListenOption) (*Listener, error) {
+	var logger logr.Logger = &noopLogger
+	for _, opt := range options {
+		opt.apply(&logger)
+	}
+	logger = logger.WithValues("laddr", localAddr)
+	manager, err := newSocketManager(logger, network, (*net.UDPAddr)(localAddr), nil)
 	if err != nil {
 		return nil, err
 	}
-	localAddr = manager.LocalAddr().(*net.UDPAddr)
+	udpLocalAddr := manager.LocalAddr().(*net.UDPAddr)
 	utpListener := &Listener{
 		utpSocket: utpSocket{
-			localAddr: *localAddr,
+			localAddr: udpLocalAddr,
 			manager:   manager,
 		},
 		acceptChan: manager.acceptChan,
 	}
-	utpListener.stateCond.L = &utpListener.stateLock
 	manager.start()
 	return utpListener, nil
 }
 
-func (u *Conn) Close() error {
-	// indicate our desire to close; once buffers are flushed, we can continue
-	u.stateLock.Lock()
-	u.willClose = true
-	u.stateLock.Unlock()
+type ListenOption interface {
+	apply(l *logr.Logger)
+}
 
-	u.stateLock.Lock()
-	alreadyClosedOrClosing := u.closing
-	u.closing = true
-	u.stateLock.Unlock()
-	if alreadyClosedOrClosing {
+type listenOptionLogger struct {
+	logger logr.Logger
+}
+
+func (lo *listenOptionLogger) apply(l *logr.Logger) {
+	*l = lo.logger
+}
+
+func WithLogger(logger logr.Logger) ListenOption {
+	return &listenOptionLogger{logger: logger}
+}
+
+func (c *Conn) Close() error {
+	// indicate our desire to close; once buffers are flushed, we can continue
+	c.stateLock.Lock()
+	if c.willClose {
 		return errors.New("multiple calls to Close() not allowed")
 	}
+	c.willClose = true
+	c.stateLock.Unlock()
+
+	// wait for write buffer to be flushed
+	c.writeBuffer.FlushAndClose()
+
+	// if there are still any blocked reads, shut them down
+	c.readBuffer.Close()
+
+	// close baseConn
 	err := func() error {
 		// yes, even libutp.(*UTPSocket).Close() needs concurrency protection;
 		// it may end up invoking callbacks
-		u.manager.baseConnLock.Lock()
-		defer u.manager.baseConnLock.Unlock()
-		return u.baseConn.Close()
+		c.manager.baseConnLock.Lock()
+		defer c.manager.baseConnLock.Unlock()
+		c.logger.V(10).Info("closing baseconn")
+		return c.baseConn.Close()
 	}()
-	socketCloseErr := u.utpSocket.Close()
 
-	// if err was already set, this one is likely to be more helpful/interesting.
+	// wait for socket to enter StateDestroying
+	<-c.baseConnDestroyed
+
+	c.setEncounteredError(net.ErrClosed)
+	socketCloseErr := c.utpSocket.Close()
+
+	// even if err was already set, this one is likely to be more helpful/interesting.
 	if socketCloseErr != nil {
 		err = socketCloseErr
 	}
 	return err
 }
 
-func (u *Conn) Read(buf []byte) (n int, err error) {
-	u.stateLock.Lock()
-	defer u.stateLock.Unlock()
-	if u.opError != nil {
-		return 0, u.opError
+func (c *Conn) SetLogger(logger logr.Logger) {
+	c.baseConn.SetLogger(logger)
+}
+
+func (c *Conn) Read(buf []byte) (n int, err error) {
+	return c.ReadContext(context.Background(), buf)
+}
+
+func (c *Conn) ReadContext(ctx context.Context, buf []byte) (n int, err error) {
+	c.stateLock.Lock()
+	encounteredErr := c.encounteredError
+	deadline := c.readDeadline
+	c.stateLock.Unlock()
+
+	if !deadline.IsZero() {
+		var cancel func()
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
-	for len(u.readBuffer) < len(buf) {
-		u.stateCond.Wait()
-		if u.opError != nil {
-			return 0, u.opError
+	for {
+		n, ok := c.readBuffer.TryConsume(buf)
+		if ok {
+			return n, nil
+		}
+		if encounteredErr != nil {
+			return 0, encounteredErr
+		}
+		waitChan, cancelWait, err := c.readBuffer.WaitForBytesChan(1)
+		if err != nil {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			cancelWait()
+			err = ctx.Err()
+			if errors.Is(err, context.DeadlineExceeded) {
+				// transform deadline error to os.ErrDeadlineExceeded as per
+				// net.Conn specification
+				err = c.makeOpError("read", os.ErrDeadlineExceeded)
+			}
+			return 0, err
+		case <-c.closeChan:
+			cancelWait()
+			return 0, c.makeOpError("read", net.ErrClosed)
+		case <-waitChan:
 		}
 	}
-	copy(buf, u.readBuffer[:len(buf)])
-	remaining := len(u.readBuffer) - len(buf)
-	copy(u.readBuffer[:remaining], u.readBuffer[len(buf):])
-	u.readBuffer = u.readBuffer[:remaining]
-	return len(buf), nil
 }
 
-func (u *Conn) Write(buf []byte) (n int, err error) {
-	u.stateLock.Lock()
-	defer u.stateLock.Unlock()
-	if u.opError != nil {
-		return 0, u.opError
+func (c *Conn) Write(buf []byte) (n int, err error) {
+	return c.WriteContext(context.Background(), buf)
+}
+
+func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) {
+	c.stateLock.Lock()
+	err = c.encounteredError
+	willClose := c.willClose
+	deadline := c.writeDeadline
+	c.stateLock.Unlock()
+	if err != nil {
+		if err == io.EOF {
+			// remote side closed connection cleanly, and µTP in/out streams
+			// are not independently closeable. Doesn't make sense to return
+			// an EOF from a Write method, so..
+			err = c.makeOpError("write", syscall.ECONNRESET)
+		}
+		return 0, err
 	}
-	for cap(u.writeBuffer)-len(u.writeBuffer) < len(buf) {
-		u.stateCond.Wait()
-		if u.opError != nil {
-			return 0, u.opError
+	if willClose {
+		// it may not be completely closed yet, but Close() has been called,
+		// so we can't accept any more writes
+		return 0, c.makeOpError("write", net.ErrClosed)
+	}
+
+	if !deadline.IsZero() {
+		var cancel func()
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	for {
+		c.stateLock.Lock()
+		willClose = c.willClose
+		c.stateLock.Unlock()
+		if willClose {
+			return 0, c.makeOpError("write", net.ErrClosed)
+		}
+
+		if ok := c.writeBuffer.TryAppend(buf); ok {
+			// make sure µTP knows about the new bytes. this might be a bit
+			// confusing, but it doesn't matter if other writes occur between
+			// the TryAppend() above and the acquisition of the baseConnLock
+			// below. All that matters is that (a) there is at least one call
+			// to baseConn.Write scheduled to be made after this point (without
+			// undue blocking); (b) baseConnLock is held when that Write call
+			// is made; and (c) the amount of data in the write buffer does not
+			// decrease between the SpaceUsed() call and the start of the next
+			// call to onWriteCallback.
+			func() {
+				c.manager.baseConnLock.Lock()
+				defer c.manager.baseConnLock.Unlock()
+
+				amount := c.writeBuffer.SpaceUsed()
+				c.logger.V(10).Info("initiating write to libutp layer", "len", amount)
+				c.baseConn.Write(amount)
+			}()
+
+			return len(buf), nil
+		}
+
+		waitChan, cancelWait, err := c.writeBuffer.WaitForSpaceChan(len(buf))
+		if err != nil {
+			return 0, err
+		}
+
+		// couldn't write the data yet; wait until we can, or until we hit the
+		// timeout, or until the conn is closed.
+		select {
+		case <-ctx.Done():
+			cancelWait()
+			err = ctx.Err()
+			if errors.Is(err, context.DeadlineExceeded) {
+				// transform deadline error to os.ErrDeadlineExceeded as per
+				// net.Conn specification
+				err = c.makeOpError("write", os.ErrDeadlineExceeded)
+			}
+			return 0, err
+		case <-c.closeChan:
+			cancelWait()
+			return 0, c.makeOpError("write", net.ErrClosed)
+		case <-waitChan:
 		}
 	}
-	oldLen := len(u.writeBuffer)
-	u.writeBuffer = u.writeBuffer[:oldLen+len(buf)]
-	copy(u.writeBuffer[oldLen:], buf)
-
-	u.manager.wantsToWrite <- struct{}{}
-	return len(buf), nil
 }
 
-func (u *Conn) LocalAddr() net.Addr {
-	return u.Addr()
+func (c *Conn) RemoteAddr() net.Addr {
+	// GetPeerName is thread-safe
+	return (*Addr)(c.baseConn.GetPeerName())
 }
 
-func (u *Conn) RemoteAddr() net.Addr {
-	// thread-safe
-	return u.baseConn.GetPeerName()
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	c.stateLock.Lock()
+	defer c.stateLock.Unlock()
+	c.readDeadline = t
+	return nil
 }
 
-func (u *Conn) SetReadDeadline(t time.Time) error {
-	// TODO
-	return errors.New("not supported yet")
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	c.stateLock.Lock()
+	defer c.stateLock.Unlock()
+	c.writeDeadline = t
+	return nil
 }
 
-func (u *Conn) SetWriteDeadline(t time.Time) error {
-	// TODO
-	return errors.New("not supported yet")
+func (c *Conn) SetDeadline(t time.Time) error {
+	c.stateLock.Lock()
+	defer c.stateLock.Unlock()
+	c.writeDeadline = t
+	c.readDeadline = t
+	return nil
 }
 
-func (u *Conn) SetDeadline(t time.Time) error {
-	// TODO
-	return errors.New("not supported yet")
+func (c *Conn) makeOpError(op string, err error) error {
+	opErr := c.utpSocket.makeOpError(op, err).(*net.OpError)
+	opErr.Source = opErr.Addr
+	opErr.Addr = c.RemoteAddr()
+	return opErr
 }
 
 var _ net.Conn = &Conn{}
 
-func (u *Listener) AcceptUTP() (*Conn, error) {
-	newConn, ok := <-u.acceptChan
-	if ok {
-		return newConn, nil
+func (l *Listener) AcceptUTPContext(ctx context.Context) (*Conn, error) {
+	select {
+	case newConn, ok := <-l.acceptChan:
+		if ok {
+			return newConn, nil
+		}
+		err := l.encounteredError
+		if err == nil {
+			err = l.makeOpError("accept", net.ErrClosed)
+		}
+		return nil, err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return nil, u.opError
 }
 
-func (u *Listener) Accept() (net.Conn, error) {
-	return u.AcceptUTP()
+func (l *Listener) AcceptUTP() (*Conn, error) {
+	return l.AcceptUTPContext(context.Background())
 }
 
-func (u *Listener) Close() error {
-	u.baseConnClosed = true
-	return u.utpSocket.Close()
+func (l *Listener) Accept() (net.Conn, error) {
+	return l.AcceptUTP()
+}
+
+func (l *Listener) AcceptContext(ctx context.Context) (net.Conn, error) {
+	return l.AcceptUTPContext(ctx)
+}
+
+func (l *Listener) Close() error {
+	return l.utpSocket.Close()
+}
+
+func (l *Listener) Addr() net.Addr {
+	return l.utpSocket.LocalAddr()
 }
 
 var _ net.Listener = &Listener{}
 
-func (u *utpSocket) Close() (err error) {
-	u.setOpError(net.ErrClosed)
-	// wait for socket to enter StateDestroying
-	u.stateLock.Lock()
-	for !u.baseConnClosed {
-		u.stateCond.Wait()
+func (u *utpSocket) makeOpError(op string, err error) error {
+	return &net.OpError{
+		Op:     op,
+		Net:    "utp",
+		Source: nil,
+		Addr:   u.LocalAddr(),
+		Err:    err,
 	}
+}
+
+func (u *utpSocket) Close() (err error) {
+	u.stateLock.Lock()
 	if u.manager != nil {
 		err = u.manager.decrementReferences()
 		u.manager = nil
@@ -339,33 +499,30 @@ func (u *utpSocket) Close() (err error) {
 	return err
 }
 
-func (u *utpSocket) setOpError(err error) {
+func (c *Conn) setEncounteredError(err error) {
 	if err == nil {
 		return
 	}
-	u.stateLock.Lock()
-	defer u.stateLock.Unlock()
+	c.stateLock.Lock()
+	defer c.stateLock.Unlock()
 
-	u.connecting = false
 	// keep the first error if this is called multiple times
-	if u.opError == nil {
-		u.opError = err
-		u.stateCond.Broadcast()
+	if c.encounteredError == nil {
+		c.encounteredError = err
+	}
+	if c.connecting {
+		c.connecting = false
+		close(c.connectChan)
 	}
 }
 
-func (u *utpSocket) Addr() net.Addr {
-	localAddr := u.localAddr // copy
-	return &localAddr
-}
-
-type receivedMessage struct {
-	destAddr net.UDPAddr
-	data     []byte
+func (u *utpSocket) LocalAddr() net.Addr {
+	return (*Addr)(u.localAddr)
 }
 
 type socketManager struct {
 	mx        *libutp.SocketMultiplexer
+	logger    logr.Logger
 	udpSocket *net.UDPConn
 
 	// this lock should be held when invoking any libutp functions or methods
@@ -377,28 +534,17 @@ type socketManager struct {
 	refCountLock sync.Mutex
 	refCount     int
 
-	// closeChan is a channel that should be closed once Conn.Close() has
-	// been called. Indicates that the managing goroutine should clean up and
-	// return the close error on closeErr.
-	closeChan chan struct{}
+	// cancelManagement is a cancel function that should be called to close
+	// down the socket management goroutines. The main managing goroutine
+	// should clean up and return any close error on closeErr.
+	cancelManagement func()
 	// closeErr is a channel on which the managing goroutine will return any
 	// errors from a close operation when all is complete.
 	closeErr chan error
-	// set to true when closing down (set before closeChan is closed)
-	closing bool
 
-	// the udp reader goroutine will do a write to this channel when new
-	// packets have been received for processing by the µTP machinery.
-	incomingPacket chan receivedMessage
-	// when processing of an item from incomingPacket is complete, a send will
-	// be done on this channel in response.
-	incomingPacketDone chan struct{}
-
-	// an empty object is written to this whenever there are new packets to be
-	// sent out (but only if the write queue was empty beforehand)
-	wantsToWrite chan struct{}
-
-	// to be allocated with a buffer the size of the intended backlog
+	// to be allocated with a buffer the size of the intended backlog. There
+	// can be at most one utpSocket able to receive on this channel (one
+	// Listener for any given UDP socket).
 	acceptChan chan *Conn
 
 	// just a way to accumulate errors in sending or receiving on the UDP
@@ -414,7 +560,7 @@ const (
 	defaultUTPConnBacklogSize = 5
 )
 
-func newSocketManager(network string, laddr, raddr *net.UDPAddr) (*socketManager, error) {
+func newSocketManager(logger logr.Logger, network string, laddr, raddr *net.UDPAddr) (*socketManager, error) {
 	switch network {
 	case "utp", "utp4", "utp6":
 	default:
@@ -427,7 +573,7 @@ func newSocketManager(network string, laddr, raddr *net.UDPAddr) (*socketManager
 
 	udpNetwork := "udp" + network[3:]
 	// thread-safe here; don't need baseConnLock
-	mx := libutp.NewSocketMultiplexer(&noopLogger, nil)
+	mx := libutp.NewSocketMultiplexer(logger.WithName("mx").WithValues("laddr", laddr.String()), nil)
 
 	udpSocket, err := net.ListenUDP(udpNetwork, laddr)
 	if err != nil {
@@ -435,47 +581,49 @@ func newSocketManager(network string, laddr, raddr *net.UDPAddr) (*socketManager
 	}
 
 	sm := &socketManager{
-		mx:                 mx,
-		udpSocket:          udpSocket,
-		refCount:           1,
-		closeChan:          make(chan struct{}),
-		closeErr:           make(chan error),
-		incomingPacket:     make(chan receivedMessage),
-		incomingPacketDone: make(chan struct{}),
-		wantsToWrite:       make(chan struct{}, 1),
-		acceptChan:         make(chan *Conn, defaultUTPConnBacklogSize),
-		pollInterval:       5 * time.Millisecond,
+		mx:           mx,
+		logger:       logger.WithName("manager").WithValues("laddr", udpSocket.LocalAddr()),
+		udpSocket:    udpSocket,
+		refCount:     1,
+		closeErr:     make(chan error),
+		acceptChan:   make(chan *Conn, defaultUTPConnBacklogSize),
+		pollInterval: 5 * time.Millisecond,
 	}
 	return sm, nil
 }
 
 func (sm *socketManager) start() {
-	go sm.socketManagement()
-	go sm.udpMessageReceiver()
+	ctx, cancel := context.WithCancel(context.Background())
+	sm.cancelManagement = cancel
+
+	managementLabels := pprof.Labels(
+		"name", "socket-management", "udp-socket", sm.udpSocket.LocalAddr().String())
+	receiverLabels := pprof.Labels(
+		"name", "udp-receiver", "udp-socket", sm.udpSocket.LocalAddr().String())
+	go func() {
+		pprof.Do(ctx, managementLabels, sm.socketManagement)
+	}()
+	go func() {
+		pprof.Do(ctx, receiverLabels, sm.udpMessageReceiver)
+	}()
 }
 
 func (sm *socketManager) LocalAddr() net.Addr {
 	return sm.udpSocket.LocalAddr()
 }
 
-func (sm *socketManager) socketManagement() {
-	// when these deferreds are run, all attached Conn instances should be
-	// closed already
-	defer close(sm.wantsToWrite)
-	defer close(sm.incomingPacketDone)
-
+func (sm *socketManager) socketManagement(ctx context.Context) {
 	timer := time.NewTimer(sm.pollInterval)
 	defer timer.Stop()
 	for {
 		timer.Reset(sm.pollInterval)
 		select {
-		case <-sm.closeChan:
+		case <-ctx.Done():
+			// at this point, all attached Conn instances should be
+			// closed already
 			sm.internalClose()
 			return
-		case packet := <-sm.incomingPacket:
-			sm.processIncomingPacket(packet.data, &packet.destAddr)
 		case <-timer.C:
-		case <-sm.wantsToWrite:
 		}
 		sm.checkTimeouts()
 	}
@@ -485,7 +633,6 @@ func (sm *socketManager) processIncomingPacket(data []byte, destAddr *net.UDPAdd
 	sm.baseConnLock.Lock()
 	defer sm.baseConnLock.Unlock()
 	sm.mx.IsIncomingUTP(gotIncomingConnectionCallback, packetSendCallback, sm, data, destAddr)
-	sm.incomingPacketDone <- struct{}{}
 }
 
 func (sm *socketManager) checkTimeouts() {
@@ -513,55 +660,39 @@ func (sm *socketManager) decrementReferences() error {
 	defer sm.refCountLock.Unlock()
 	sm.refCount--
 	if sm.refCount == 0 {
-		sm.closing = true
-		close(sm.closeChan)
+		sm.logger.V(1).Info("closing socketManager")
+		sm.cancelManagement()
 		return <-sm.closeErr
 	}
 	if sm.refCount < 0 {
-		return errors.New("socketManager closed too many times!")
+		return errors.New("socketManager closed too many times")
 	}
 	return nil
 }
 
-func (sm *socketManager) udpMessageReceiver() {
-	defer close(sm.incomingPacket)
-
+func (sm *socketManager) udpMessageReceiver(ctx context.Context) {
 	// thread-safe; don't need baseConnLock
 	maxSize := libutp.GetUDPMTU(sm.LocalAddr().(*net.UDPAddr))
 	b := make([]byte, maxSize)
 	for {
 		n, addr, err := sm.udpSocket.ReadFromUDP(b)
 		if err != nil {
-			if sm.closing {
+			if ctx.Err() != nil {
+				// we expect an error here; the socket has been closed; it's fine
 				return
 			}
 			sm.registerSocketError(err)
 			continue
 		}
-		log.Printf("UDP RECEIVED %d bytes from %s to %s", n, addr.String(), sm.udpSocket.LocalAddr().String())
-		msg := receivedMessage{
-			destAddr: *addr,
-			data:     b[:n],
-		}
-		select {
-		case sm.incomingPacket <- msg:
-			// wait until processing on that packet is done, so we can (a) keep
-			// backpressure on incoming data, and (b) reuse the b buffer
-			select {
-			case <-sm.incomingPacketDone:
-			case <-sm.closeChan:
-				return
-			}
-		case <-sm.closeChan:
-			return
-		}
+		sm.logger.V(10).Info("udp received bytes", "len", n, "raddr", addr)
+		sm.processIncomingPacket(b[:n], addr)
 	}
 }
 
 func (sm *socketManager) registerSocketError(err error) {
 	sm.socketErrorsLock.Lock()
 	defer sm.socketErrorsLock.Unlock()
-	log.Printf("SOCKET ERROR ON %s: %v", sm.udpSocket.LocalAddr(), err)
+	sm.logger.Error(err, "socket error")
 	sm.socketErrors = append(sm.socketErrors, err)
 }
 
@@ -577,14 +708,16 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 
 	newUTPConn := &Conn{
 		utpSocket: utpSocket{
-			localAddr: *sm.LocalAddr().(*net.UDPAddr),
+			localAddr: sm.LocalAddr().(*net.UDPAddr),
 			manager:   sm,
 		},
-		baseConn:    newBaseConn,
-		readBuffer:  make([]byte, 0, readBufferSize),
-		writeBuffer: make([]byte, 0, writeBufferSize),
+		logger:            sm.logger.WithName("utp-socket").WithValues("dir", "in"),
+		baseConn:          newBaseConn,
+		closeChan:         make(chan struct{}),
+		baseConnDestroyed: make(chan struct{}),
+		readBuffer:        buffers.NewSyncBuffer(readBufferSize),
+		writeBuffer:       buffers.NewSyncBuffer(writeBufferSize),
 	}
-	newUTPConn.stateCond.L = &newUTPConn.stateLock
 	newBaseConn.SetCallbacks(&libutp.CallbackTable{
 		OnRead:    onReadCallback,
 		OnWrite:   onWriteCallback,
@@ -592,52 +725,30 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnState:   onStateCallback,
 		OnError:   onErrorCallback,
 	}, newUTPConn)
+	newUTPConn.baseConn.SetLogger(sm.logger.WithName("utp-socket").WithValues(
+		"laddr", sm.LocalAddr().String(),
+		"raddr", newUTPConn.RemoteAddr().String()))
+	sm.logger.V(1).Info("accepted new connection", "raddr", newUTPConn.RemoteAddr())
 	select {
 	case sm.acceptChan <- newUTPConn:
 		// it's the socketManager's problem now
 	default:
-		// The accept backlog is full; drop this new connection. (This will
-		// decref the socket manager as appropriate.)
-		_ = newUTPConn.Close()
+		sm.logger.Info("dropping new connection because full backlog", "raddr", newUTPConn.RemoteAddr())
+		// The accept backlog is full; drop this new connection. We can't call
+		// (*Conn).Close() from here, because the baseConnLock is already held.
+		// Fortunately, most of the steps done there aren't necessary here
+		// because we have never exposed this instance to the user.
+		_ = newUTPConn.baseConn.Close()
+		// This step will decref the socketManager back to where it was before
+		// this instance was created.
+		_ = newUTPConn.manager.decrementReferences()
+		newUTPConn.manager = nil
 	}
-}
-
-func (u *Conn) addToReadBuffer(data []byte) error {
-	u.stateLock.Lock()
-	defer u.stateLock.Unlock()
-
-	bufferRoom := cap(u.readBuffer) - len(u.readBuffer)
-	if bufferRoom < len(data) {
-		return fmt.Errorf("queue has size %d, %d bytes available, but appending %d bytes", len(u.readBuffer), bufferRoom, len(data))
-	}
-	oldLen := len(u.readBuffer)
-	u.readBuffer = u.readBuffer[:oldLen+len(data)]
-	copy(u.readBuffer[oldLen:], data)
-
-	u.stateCond.Signal()
-	return nil
-}
-
-func (u *Conn) readOutFromWriteBuffer(buf []byte) error {
-	u.stateLock.Lock()
-	defer u.stateLock.Unlock()
-
-	if len(u.writeBuffer) < len(buf) {
-		return fmt.Errorf("asked for %d bytes, but write buffer only has %d bytes available", len(buf), len(u.writeBuffer))
-	}
-
-	copy(buf, u.writeBuffer[:len(buf)])
-	remainder := len(u.writeBuffer) - len(buf)
-	copy(u.writeBuffer[:remainder], u.writeBuffer[len(buf):])
-	u.writeBuffer = u.writeBuffer[:remainder]
-
-	u.stateCond.Signal()
-	return nil
 }
 
 func packetSendCallback(userdata interface{}, buf []byte, addr *net.UDPAddr) {
 	sm := userdata.(*socketManager)
-	log.Printf("UDP SENDING %d bytes from %s to %s", len(buf), sm.udpSocket.LocalAddr().String(), addr.String())
+	sm.logger.V(10).Info("udp sending bytes", "len", len(buf), "raddr", addr.String())
 	_, err := sm.udpSocket.WriteToUDP(buf, addr)
 	if err != nil {
 		sm.registerSocketError(err)
@@ -645,65 +756,77 @@ func packetSendCallback(userdata interface{}, buf []byte, addr *net.UDPAddr) {
 }
 
 func onReadCallback(userdata interface{}, buf []byte) {
-	u := userdata.(*Conn)
-	err := u.addToReadBuffer(buf)
-	if err != nil {
-		// not enough room in the read buffer. perhaps here we should close
-		// u.baseConn? or is libutp supposed to make this case impossible,
-		// assuming the read buffer size is as expected?
-		u.setOpError(fmt.Errorf("could not add to read buffer: %w", err))
+	c := userdata.(*Conn)
+	c.logger.V(10).Info("read callback from libutp layer providing bytes", "len", len(buf))
+	if ok := c.readBuffer.TryAppend(buf); !ok {
+		// I think this should not happen; the flow control mechanism should
+		// keep us from getting more data than the (libutp-level) receive
+		// buffer can hold.
+		panic("receive buffer overflow")
 	}
 }
 
 func onWriteCallback(userdata interface{}, buf []byte) {
-	u := userdata.(*Conn)
-	err := u.readOutFromWriteBuffer(buf)
-	if err != nil {
-		u.setOpError(fmt.Errorf("onWrite callback: %w", err))
+	c := userdata.(*Conn)
+	c.logger.V(10).Info("write callback from libutp layer consuming bytes", "len", len(buf))
+	ok := c.writeBuffer.TryConsumeFull(buf)
+	if !ok {
+		// I think this should not happen; this callback should only be called
+		// with data less than or equal to the number we pass in with
+		// libutp.(*Socket).Write(). That gets passed in under the
+		// baseConnLock, and this gets called under that same lock, so it also
+		// shouldn't be possible for something to pull data from the write
+		// buffer between that point and this point.
+		panic("send buffer underflow")
 	}
 }
 
 func getRBSizeCallback(userdata interface{}) int {
-	u := userdata.(*Conn)
-	u.stateLock.Lock()
-	defer u.stateLock.Unlock()
-	return len(u.readBuffer)
+	c := userdata.(*Conn)
+	return c.readBuffer.SpaceUsed()
 }
 
 // the baseConnLock should already be held when this callback is entered
 func onStateCallback(userdata interface{}, state libutp.State) {
-	u := userdata.(*Conn)
+	c := userdata.(*Conn)
+	c.logger.V(10).Info("onState callback from libutp layer", "state", state.String())
 	switch state {
 	case libutp.StateConnect, libutp.StateWritable:
-		u.stateLock.Lock()
-		if u.connecting {
-			u.connecting = false
-			u.stateCond.Broadcast()
+		c.stateLock.Lock()
+		if c.connecting {
+			c.connecting = false
+			close(c.connectChan)
 		}
-		writeAmount := len(u.writeBuffer)
-		u.stateLock.Unlock()
-		if writeAmount > 0 {
-			u.baseConn.Write(writeAmount)
+		if writeAmount := c.writeBuffer.SpaceUsed(); writeAmount > 0 {
+			c.logger.V(10).Info("initiating write to libutp layer", "len", writeAmount)
+			c.baseConn.Write(writeAmount)
+		} else {
+			c.logger.V(10).Info("nothing to write")
 		}
+		c.stateLock.Unlock()
 	case libutp.StateEOF:
-		u.setOpError(&net.OpError{
-			Op:     "?",
-			Net:    u.localAddr.Network(),
-			Source: u.LocalAddr(),
-			Addr:   u.baseConn.GetPeerName(),
-			Err:    syscall.ECONNRESET,
-		})
+		c.setEncounteredError(io.EOF)
 	case libutp.StateDestroying:
-		u.stateLock.Lock()
-		u.baseConnClosed = true
-		u.baseConn = nil
-		u.stateCond.Broadcast()
-		u.stateLock.Unlock()
+		close(c.baseConnDestroyed)
 	}
 }
 
 // the baseConnLock should already be held when this callback is entered
 func onErrorCallback(userdata interface{}, err error) {
-	u := userdata.(*Conn)
-	u.setOpError(err)
+	c := userdata.(*Conn)
+	c.logger.Error(err, "onError callback from libutp layer")
+	c.setEncounteredError(err)
+}
+
+func ResolveUTPAddr(network, address string) (*Addr, error) {
+	switch network {
+	case "utp", "utp4", "utp6":
+		udpNetwork := "udp" + network[3:]
+		udpAddr, err := net.ResolveUDPAddr(udpNetwork, address)
+		if err != nil {
+			return nil, err
+		}
+		return (*Addr)(udpAddr), nil
+	}
+	return nil, net.UnknownNetworkError(network)
 }

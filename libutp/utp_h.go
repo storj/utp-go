@@ -12,7 +12,7 @@ import "net"
 //
 // Example:
 //
-//     conn := base.Create(logger, sendToCallback, sendToUserdata, destAddr)
+//     conn := base.Create(sendToCallback, sendToUserdata, destAddr)
 //     conn.SetSockopt(libutp.SO_UTPVERSION, 1)  // µTP version 1
 //
 const SO_UTPVERSION = 99
@@ -39,6 +39,10 @@ const (
 	// socket after this state change occurs.
 	StateDestroying = 4
 )
+
+func (s State) String() string {
+	return stateNames[s]
+}
 
 // OnReadCallback is the type of callback to be used when a socket has received
 // application data from the peer. The callback will be provided with the
