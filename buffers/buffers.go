@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	IsClosedErr = errors.New("sync buffer is closed")
+	IsClosedErr             = errors.New("sync buffer is closed")
 	ReaderAlreadyWaitingErr = errors.New("a reader is already waiting")
 	WriterAlreadyWaitingErr = errors.New("a writer is already waiting")
 )
@@ -28,6 +28,9 @@ type SyncCircularBuffer struct {
 	start int
 	end   int
 	wraps bool
+
+	closedForWrites bool
+	closedForReads  bool
 }
 
 func NewSyncBuffer(size int) *SyncCircularBuffer {
@@ -96,10 +99,13 @@ func (sb *SyncCircularBuffer) cancelReadWait(waitChan <-chan struct{}) {
 
 func (sb *SyncCircularBuffer) Append(ctx context.Context, data []byte) error {
 	for {
-		ok := sb.TryAppend(data)
-		if ok {
+		if ok := sb.TryAppend(data); ok {
 			return nil
 		}
+		if sb.closedForWrites {
+			return IsClosedErr
+		}
+
 		waitForSpace, cancelWait, err := sb.WaitForSpaceChan(len(data))
 		if err != nil {
 			// something is already waiting to append to this buffer
@@ -109,7 +115,7 @@ func (sb *SyncCircularBuffer) Append(ctx context.Context, data []byte) error {
 		case <-ctx.Done():
 			cancelWait()
 			return ctx.Err()
-		case _, ok = <-waitForSpace:
+		case _, ok := <-waitForSpace:
 			if !ok {
 				return IsClosedErr
 			}
@@ -121,6 +127,9 @@ func (sb *SyncCircularBuffer) Consume(ctx context.Context, data []byte) (n int, 
 	for {
 		if n, ok := sb.TryConsume(data); ok {
 			return n, nil
+		}
+		if sb.closedForReads {
+			return 0, IsClosedErr
 		}
 		waitChan, cancelWait, err := sb.WaitForBytesChan(1)
 		if err != nil {
@@ -141,10 +150,13 @@ func (sb *SyncCircularBuffer) Consume(ctx context.Context, data []byte) (n int, 
 
 func (sb *SyncCircularBuffer) ConsumeFull(ctx context.Context, data []byte) error {
 	for {
-		ok := sb.TryConsumeFull(data)
-		if ok {
+		if ok := sb.TryConsumeFull(data); ok {
 			return nil
 		}
+		if sb.closedForReads {
+			return IsClosedErr
+		}
+
 		waitChan, cancelWait, err := sb.WaitForBytesChan(len(data))
 		if err != nil {
 			// something is already waiting to read from this buffer
@@ -154,7 +166,7 @@ func (sb *SyncCircularBuffer) ConsumeFull(ctx context.Context, data []byte) erro
 		case <-ctx.Done():
 			cancelWait()
 			return ctx.Err()
-		case _, ok = <-waitChan:
+		case _, ok := <-waitChan:
 			if !ok {
 				return IsClosedErr
 			}
@@ -166,6 +178,9 @@ func (sb *SyncCircularBuffer) TryAppend(data []byte) (ok bool) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
+	if sb.closedForWrites {
+		return false
+	}
 	if sb.spaceAvailable() < len(data) {
 		return false
 	}
@@ -205,6 +220,9 @@ func (sb *SyncCircularBuffer) TryConsume(data []byte) (n int, ok bool) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
+	if sb.closedForReads {
+		return 0, false
+	}
 	haveBytes := sb.spaceUsed()
 	if haveBytes == 0 {
 		return 0, false
@@ -222,6 +240,9 @@ func (sb *SyncCircularBuffer) TryConsumeFull(data []byte) (ok bool) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
+	if sb.closedForReads {
+		return false
+	}
 	if sb.spaceUsed() < len(data) {
 		return false
 	}
@@ -271,6 +292,7 @@ func (sb *SyncCircularBuffer) FlushAndClose() {
 			// cancel any pending write
 			close(sb.writeWaiter)
 			sb.writeWaiter = nil
+			sb.closedForWrites = true
 		}
 		// model this as waiting for a write the size of the entire buffer
 		var err error
@@ -281,6 +303,34 @@ func (sb *SyncCircularBuffer) FlushAndClose() {
 		}
 	}()
 	<-waitChan
+	sb.Close()
+}
+
+func (sb *SyncCircularBuffer) Clear() {
+	sb.lock.Lock()
+	defer sb.lock.Unlock()
+
+	if sb.readWaiter != nil {
+		// cancel any pending reads
+		close(sb.readWaiter)
+		sb.readWaiter = nil
+	}
+	if sb.writeWaiter != nil {
+		// cancel any pending writes
+		close(sb.writeWaiter)
+		sb.writeWaiter = nil
+	}
+	sb.start = 0
+	sb.end = 0
+	sb.wraps = false
+	sb.writeSizeTrigger = 0
+	sb.readSizeTrigger = 0
+	sb.closedForReads = false
+	sb.closedForWrites = false
+
+	for i := 0; i < len(sb.buffer); i++ {
+		sb.buffer[i] = 0
+	}
 }
 
 func (sb *SyncCircularBuffer) Close() {
@@ -288,13 +338,17 @@ func (sb *SyncCircularBuffer) Close() {
 	defer sb.lock.Unlock()
 
 	if sb.readWaiter != nil {
+		// cancel any pending reads
 		close(sb.readWaiter)
 		sb.readWaiter = nil
 	}
 	if sb.writeWaiter != nil {
+		// cancel any pending writes
 		close(sb.writeWaiter)
 		sb.writeWaiter = nil
 	}
+	sb.closedForReads = true
+	sb.closedForWrites = true
 }
 
 func (sb *SyncCircularBuffer) SpaceAvailable() int {

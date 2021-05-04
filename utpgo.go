@@ -112,7 +112,7 @@ func DialUTP(network string, laddr, raddr *Addr) (*Conn, error) {
 	return DialUTPOptions(network, laddr, raddr)
 }
 
-func DialUTPOptions(network string, laddr, raddr *Addr, options ...ListenOption) (*Conn, error) {
+func DialUTPOptions(network string, laddr, raddr *Addr, options ...ConnectOption) (*Conn, error) {
 	var logger logr.Logger = &noopLogger
 	for _, opt := range options {
 		opt.apply(&logger)
@@ -195,7 +195,7 @@ func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
 	return ListenUTPOptions(network, localAddr)
 }
 
-func ListenUTPOptions(network string, localAddr *Addr, options ...ListenOption) (*Listener, error) {
+func ListenUTPOptions(network string, localAddr *Addr, options ...ConnectOption) (*Listener, error) {
 	var logger logr.Logger = &noopLogger
 	for _, opt := range options {
 		opt.apply(&logger)
@@ -217,7 +217,7 @@ func ListenUTPOptions(network string, localAddr *Addr, options ...ListenOption) 
 	return utpListener, nil
 }
 
-type ListenOption interface {
+type ConnectOption interface {
 	apply(l *logr.Logger)
 }
 
@@ -229,7 +229,7 @@ func (lo *listenOptionLogger) apply(l *logr.Logger) {
 	*l = lo.logger
 }
 
-func WithLogger(logger logr.Logger) ListenOption {
+func WithLogger(logger logr.Logger) ConnectOption {
 	return &listenOptionLogger{logger: logger}
 }
 
@@ -673,6 +673,7 @@ func (sm *socketManager) decrementReferences() error {
 func (sm *socketManager) udpMessageReceiver(ctx context.Context) {
 	// thread-safe; don't need baseConnLock
 	maxSize := libutp.GetUDPMTU(sm.LocalAddr().(*net.UDPAddr))
+	sm.logger.V(1).Info("udp message receiver started")
 	b := make([]byte, maxSize)
 	for {
 		n, addr, err := sm.udpSocket.ReadFromUDP(b)
@@ -805,7 +806,13 @@ func onStateCallback(userdata interface{}, state libutp.State) {
 		}
 		c.stateLock.Unlock()
 	case libutp.StateEOF:
+		// mark EOF as encountered error, so that it gets returned from
+		// subsequent Read calls
 		c.setEncounteredError(io.EOF)
+		// clear out write buffer; we won't be able to send it now. If a call
+		// to Close() is already waiting, we don't need to make it wait any
+		// longer
+		c.writeBuffer.Close()
 	case libutp.StateDestroying:
 		close(c.baseConnDestroyed)
 	}

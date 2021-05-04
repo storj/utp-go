@@ -40,6 +40,8 @@ const (
 	StateDestroying = 4
 )
 
+var stateNames = []string{"<NotAState>", "StateConnect", "StateWritable", "StateEOF", "StateDestroying"}
+
 func (s State) String() string {
 	return stateNames[s]
 }

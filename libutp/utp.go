@@ -629,6 +629,10 @@ var flagNames = []string{
 	"STData", "STFin", "STState", "STReset", "STSyn",
 }
 
+func (fn packetFlag) String() string {
+	return flagNames[fn]
+}
+
 type connState int
 
 const (
@@ -643,8 +647,12 @@ const (
 	csDestroy                 = 8
 )
 
-var stateNames = []string{
+var connStateNames = []string{
 	"csIdle", "csSynSent", "csConnected", "csConnectedFull", "csGotFin", "csDestroyDelay", "csFinSent", "csReset", "csDestroy",
+}
+
+func (cs connState) String() string {
+	return connStateNames[cs]
 }
 
 type outgoingPacket struct {
@@ -1284,7 +1292,7 @@ func (s *Socket) sendData(b packetHeader, data []byte, bwType BandwidthType, cur
 	seqNum := b.getSequenceNumber()
 	ackNum := b.getAckNumber()
 
-	s.logDebug("send len:%d id:%d timestamp:%d reply_micro:%d flags:%s seq_nr:%d ack_nr:%d", len(data), s.connIDSend, packetTime, s.replyMicro, flagNames[flags], seqNum, ackNum)
+	s.logDebug("send len:%d id:%d timestamp:%d reply_micro:%d flags:%s seq_nr:%d ack_nr:%d", len(data), s.connIDSend, packetTime, s.replyMicro, flags.String(), seqNum, ackNum)
 
 	sendToAddr(s.sendToCB, s.sendToUserdata, data, s.addr)
 }
@@ -1623,7 +1631,7 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 
 	s.logDebug("CheckTimeouts timeout:%d max_window:%d cur_window:%d quota:%d state:%s cur_window_packets:%d bytes_since_ack:%d ack_time:%d",
 		int(s.rtoTimeout)-int(currentMS), s.maxWindow, s.curWindow,
-		s.sendQuota/100, stateNames[s.state], s.curWindowPackets,
+		s.sendQuota/100, s.state.String(), s.curWindowPackets,
 		s.bytesSinceAck, currentMS-s.ackTime)
 
 	s.updateSendQuota(currentMS)
@@ -2179,7 +2187,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	}
 
 	conn.logDebug("Got %s. seq_nr:%d ack_nr:%d state:%s version:%d timestamp:%d reply_micro:%d",
-		flagNames[pkFlags], pkSeqNum, pkAckNum, stateNames[conn.state], conn.version, p.getPacketTime(), p.getReplyMicro())
+		pkFlags.String(), pkSeqNum, pkAckNum, conn.state.String(), conn.version, p.getPacketTime(), p.getReplyMicro())
 
 	// mark receipt time
 	receiptTime := conn.getMicroseconds()
@@ -3238,6 +3246,16 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 	}
 	for _, conn := range socketList {
 		conn.checkTimeouts(currentMS)
+
+		// (storj): this was added by thepaul without a terribly good
+		// understanding of all the interconnected workings here. this _seems_
+		// to avoid a messy situation where both sides send a FIN at about the
+		// same time, and one of them ends up waiting in this csFinSent state
+		// for 30s until it times out waiting for.. not sure what.
+		if conn.state == csFinSent && conn.gotFin {
+			conn.state = csDestroy
+		}
+
 		// Check if the object was deleted
 		if conn.state == csDestroy {
 			conn.logDebug("Destroying")
@@ -3274,9 +3292,9 @@ func GetGlobalStats() GlobalStats {
 // point the socket will change to the StateDestroying state.
 func (s *Socket) Close() error {
 	if s.state == csDestroyDelay || s.state == csFinSent || s.state == csDestroy {
-		return fmt.Errorf("can not close socket in state %s", stateNames[s.state])
+		return fmt.Errorf("can not close socket in state %s", s.state.String())
 	}
-	s.logDebug("Close in state:%s", stateNames[s.state])
+	s.logDebug("Close in state:%s", s.state.String())
 
 	switch s.state {
 	case csConnected, csConnectedFull:
