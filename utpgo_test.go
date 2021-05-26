@@ -104,6 +104,7 @@ func TestUTPConnsInParallel(t *testing.T) {
 
 func newTestServer(tb testing.TB, logger logr.Logger) *utp.Listener {
 	lAddr, err := utp.ResolveUTPAddr("utp", "127.0.0.1:0")
+	require.NoError(tb, err)
 	server, err := utp.ListenUTPOptions("utp", lAddr, utp.WithLogger(logger))
 	require.NoError(tb, err)
 	logger.Info("now listening", "laddr", server.Addr())
@@ -165,14 +166,13 @@ func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 }
 
 func makeConn(ctx context.Context, logger logr.Logger, addr net.Addr) (err error) {
-	logger = logger.WithValues("raddr", addr)
-	conn, err := utp.DialUTPOptions("utp", nil, addr.(*utp.Addr), utp.WithLogger(logger))
+	netConn, err := utp.DialUTPOptions("utp", nil, addr.(*utp.Addr), utp.WithLogger(logger))
 	if err != nil {
 		return err
 	}
-	logger = logger.WithValues("laddr", conn.LocalAddr())
-	conn.SetLogger(logger)
-	logger = logger.WithName("makeconn")
+
+	conn := netConn.(*utp.Conn)
+	logger = logger.WithName("makeConn").WithValues("local-addr", conn.LocalAddr(), "remote-addr", addr)
 	logger.Info("connection succeeded")
 	defer func() {
 		logger.Info("closing connection", "err", err)

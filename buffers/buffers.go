@@ -61,6 +61,9 @@ func (sb *SyncCircularBuffer) WaitForSpaceChan(n int) (c <-chan struct{}, cancel
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
+	if sb.closedForWrites {
+		return nil, nil, IsClosedErr
+	}
 	return sb.waitForSpaceChan(n)
 }
 
@@ -216,6 +219,15 @@ func (sb *SyncCircularBuffer) TryAppend(data []byte) (ok bool) {
 	return true
 }
 
+// TryConsume attempts to consume enough bytes from the buffer to fill the
+// given byte slice. Does not block.
+//
+// If there were _any_ bytes available in the buffer, up to len(data), they
+// are consumed and placed in the data buffer. The number of bytes consumed
+// is returned as n, and ok is true.
+//
+// The ok value is returned as false when this buffer is closed for reads
+// or when there are no bytes currently available.
 func (sb *SyncCircularBuffer) TryConsume(data []byte) (n int, ok bool) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -225,6 +237,9 @@ func (sb *SyncCircularBuffer) TryConsume(data []byte) (n int, ok bool) {
 	}
 	haveBytes := sb.spaceUsed()
 	if haveBytes == 0 {
+		if sb.closedForWrites {
+			return 0, true
+		}
 		return 0, false
 	}
 	if len(data) > haveBytes {
@@ -236,6 +251,11 @@ func (sb *SyncCircularBuffer) TryConsume(data []byte) (n int, ok bool) {
 	return len(data), true
 }
 
+// TryConsumeFull attempts to consume enough bytes from the buffer to fill the
+// given byte slice. Does not block.
+//
+// If there were enough bytes available to fill data, returns true. Otherwise,
+// the data buffer is left untouched and false is returned.
 func (sb *SyncCircularBuffer) TryConsumeFull(data []byte) (ok bool) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -282,18 +302,30 @@ func (sb *SyncCircularBuffer) popFromBuffer(data []byte) {
 	}
 }
 
+// lock must be held before calling
+func (sb *SyncCircularBuffer) cancelWaiters() {
+	if sb.writeWaiter != nil {
+		// cancel any pending write
+		close(sb.writeWaiter)
+		sb.writeWaiter = nil
+	}
+	if sb.readWaiter != nil {
+		// cancel any pending reads
+		close(sb.readWaiter)
+		sb.readWaiter = nil
+	}
+}
+
 func (sb *SyncCircularBuffer) FlushAndClose() {
 	var waitChan <-chan struct{}
 	func() {
 		sb.lock.Lock()
 		defer sb.lock.Unlock()
 
-		if sb.writeWaiter != nil {
-			// cancel any pending write
-			close(sb.writeWaiter)
-			sb.writeWaiter = nil
-			sb.closedForWrites = true
-		}
+		sb.cancelWaiters()
+		sb.closedForWrites = true
+		// (but we remain open for reads for now)
+
 		// model this as waiting for a write the size of the entire buffer
 		var err error
 		waitChan, _, err = sb.waitForSpaceChan(len(sb.buffer))
@@ -310,16 +342,8 @@ func (sb *SyncCircularBuffer) Clear() {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
-	if sb.readWaiter != nil {
-		// cancel any pending reads
-		close(sb.readWaiter)
-		sb.readWaiter = nil
-	}
-	if sb.writeWaiter != nil {
-		// cancel any pending writes
-		close(sb.writeWaiter)
-		sb.writeWaiter = nil
-	}
+	sb.cancelWaiters()
+
 	sb.start = 0
 	sb.end = 0
 	sb.wraps = false
@@ -337,18 +361,23 @@ func (sb *SyncCircularBuffer) Close() {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
-	if sb.readWaiter != nil {
-		// cancel any pending reads
-		close(sb.readWaiter)
-		sb.readWaiter = nil
-	}
-	if sb.writeWaiter != nil {
-		// cancel any pending writes
-		close(sb.writeWaiter)
-		sb.writeWaiter = nil
-	}
+	sb.cancelWaiters()
+
 	sb.closedForReads = true
 	sb.closedForWrites = true
+}
+
+func (sb *SyncCircularBuffer) CloseForWrites() {
+	sb.lock.Lock()
+	defer sb.lock.Unlock()
+
+	// cancel both types of waiter. Canceling writes because they will no longer
+	// be allowed, and cancel reads because if any read doesn't already have
+	// enough data, it will never succeed without writes.
+	sb.cancelWaiters()
+
+	sb.closedForWrites = true
+	// but remain open for reads in case there is anything left in the buffer.
 }
 
 func (sb *SyncCircularBuffer) SpaceAvailable() int {

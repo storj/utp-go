@@ -2702,8 +2702,7 @@ func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 
 // Create a µTP socket for communication with a peer at the given address.
 func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr) (*Socket, error) {
-	sockLogger := mx.logger.WithName("utp-socket").WithValues("raddr", addr)
-	conn := &Socket{logger: sockLogger, packetTimeCallback: mx.packetTimeCallback}
+	conn := &Socket{logger: mx.logger, packetTimeCallback: mx.packetTimeCallback}
 
 	currentMS := conn.getCurrentMS()
 
@@ -2950,8 +2949,9 @@ func (s *Socket) Connect() {
 // If a new connection is being initiated, a new Socket object will be created
 // and passed to the provided GotIncomingConnection callback.
 func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sendToCB PacketSendCallback, sendToUserdata interface{}, buffer []byte, toAddr *net.UDPAddr) bool {
+	logger := mx.logger.WithValues("remote-addr", toAddr)
 	if len(buffer) < minInt(sizeofPacketFormat, sizeofPacketFormatV1) {
-		mx.logger.V(10).Info("recv packet too small", "raddr", toAddr, "len", len(buffer))
+		logger.V(10).Info("recv packet too small", "len", len(buffer))
 		return false
 	}
 	currentMS := mx.getCurrentMS()
@@ -2965,12 +2965,12 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 	err := ph.decodeFromBytes(buffer)
 	if err != nil {
-		mx.logger.V(10).Info("recv packet too small for apparent format version", "raddr", toAddr, "len", len(buffer), "utp-version", version)
+		logger.V(10).Info("recv packet too small for apparent format version", "len", len(buffer), "utp-version", version)
 		return false
 	}
 	id := ph.getConnID()
 
-	mx.logger.V(10).Info("recv", "raddr", toAddr, "len", len(buffer), "id", id, "seq_nr", ph.getSequenceNumber(), "ack_nr", ph.getAckNumber())
+	logger.V(10).Info("recv", "len", len(buffer), "id", id, "seq_nr", ph.getSequenceNumber(), "ack_nr", ph.getAckNumber())
 
 	flags := ph.getPacketType()
 	for _, conn := range mx.socketMap {
@@ -3001,7 +3001,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 			}
 			return true
 		} else if flags != stSyn && conn.connIDRecv == id {
-			mx.logger.V(10).Info("recv processing", "raddr", conn.addrString)
+			logger.V(10).Info("recv processing")
 			read := mx.processIncoming(conn, buffer, false, currentMS)
 			if conn.userdata != nil {
 				conn.callbackTable.OnOverhead(conn.userdata, false,
@@ -3013,7 +3013,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 
 	if flags == stReset {
-		mx.logger.V(10).Info("recv RST for unknown connection")
+		logger.V(10).Info("recv RST for unknown connection")
 		return true
 	}
 
@@ -3033,14 +3033,14 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 				continue
 			}
 			mx.rstInfo[i].timestamp = mx.getCurrentMS()
-			mx.logger.V(10).Info("recv not sending RST to non-SYN (stored)")
+			logger.V(10).Info("recv not sending RST to non-SYN (stored)")
 			return true
 		}
 		if len(mx.rstInfo) > rstInfoLimit {
-			mx.logger.V(10).Info("recv not sending RST to non-SYN (limit stored)", "limit", len(mx.rstInfo))
+			logger.V(10).Info("recv not sending RST to non-SYN (limit stored)", "limit", len(mx.rstInfo))
 			return true
 		}
-		mx.logger.V(10).Info("recv send RST to non-SYN", "stored", len(mx.rstInfo))
+		logger.V(10).Info("recv send RST to non-SYN", "stored", len(mx.rstInfo))
 		mx.rstInfo = append(mx.rstInfo, rstInfo{})
 		r := &mx.rstInfo[len(mx.rstInfo)-1]
 		r.addr = toAddr
@@ -3053,12 +3053,12 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 
 	if incomingCB != nil {
-		mx.logger.V(10).Info("Incoming connection", "raddr", toAddr, "utp-version", version)
+		logger.V(10).Info("Incoming connection", "utp-version", version)
 
 		// Create a new UTP socket to handle this new connection
 		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr)
 		if err != nil {
-			mx.logger.V(10).Error(nil, "synchronous connections?", "raddr", toAddr)
+			logger.V(10).Error(nil, "synchronous connections?")
 			return true
 		}
 		// Need to track this value to be able to detect duplicate CONNECTs
