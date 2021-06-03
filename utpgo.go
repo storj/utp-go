@@ -731,6 +731,9 @@ func newSocketManager(logger logr.Logger, network string, localAddr, remoteAddr 
 		acceptChan:   make(chan *Conn, defaultUTPConnBacklogSize),
 		pollInterval: 5 * time.Millisecond,
 	}
+	if err := systemSetupUDPSocket(sm); err != nil {
+		return nil, err
+	}
 	return sm, nil
 }
 
