@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+
 	"storj.io/utp-go"
 )
 
@@ -65,14 +67,18 @@ func TestTLSOverUTPInParallel(t *testing.T) {
 	certPool := x509.NewCertPool()
 	certPool.AppendCertsFromPEM([]byte(certPEM))
 
+	validTime := time.Date(2021, 05, 18, 3, 50, 13, 0, time.UTC)
+
 	serverConfig := tls.Config{
 		Certificates: []tls.Certificate{x509cert},
 		MinVersion:   tls.VersionTLS13,
+		Time:         func() time.Time { return validTime },
 	}
 	clientConfig := tls.Config{
 		RootCAs:    certPool,
 		MinVersion: tls.VersionTLS13,
 		ServerName: "abcd.efg",
+		Time:       func() time.Time { return validTime },
 	}
 	addrChan := make(chan *utp.Addr, 1)
 
