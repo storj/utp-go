@@ -833,7 +833,7 @@ func (sm *socketManager) udpMessageReceiver(ctx context.Context) {
 			sm.registerSocketError(err)
 			continue
 		}
-		if flags & syscall.MSG_TRUNC != 0 {
+		if flags&msg_trunc != 0 {
 			// we didn't get the whole packet. don't pass it on to µTP; it
 			// won't recognize the truncation and will pretend like that's
 			// all the data there is. let the packet loss detection stuff
