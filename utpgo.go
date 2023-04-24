@@ -194,6 +194,7 @@ func dial(ctx context.Context, logger logr.Logger, network string, localAddr, re
 		OnError:   onErrorCallback,
 	}, utpConn)
 	utpConn.baseConn.SetLogger(connLogger.WithName("utp-socket"))
+	utpConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, readBufferSize)
 
 	manager.start()
 
@@ -883,6 +884,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnError:   onErrorCallback,
 	}, newUTPConn)
 	sm.logger.V(1).Info("accepted new connection", "remote-addr", newUTPConn.RemoteAddr())
+	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, readBufferSize)
 	select {
 	case sm.acceptChan <- newUTPConn:
 		// it's the socketManager's problem now
@@ -923,8 +925,7 @@ func onReadCallback(userdata interface{}, buf []byte) {
 
 	if ok := c.readBuffer.TryAppend(buf); !ok {
 		// I think this should not happen; the flow control mechanism should
-		// keep us from getting more data than the (libutp-level) receive
-		// buffer can hold.
+		// keep us from getting more data than the receive buffer can hold.
 		used := c.readBuffer.SpaceUsed()
 		avail := c.readBuffer.SpaceAvailable()
 		c.logger.Error(nil, "receive buffer overflow", "buffer-size", used+avail, "buffer-holds", c.readBuffer.SpaceUsed(), "new-data", len(buf))
