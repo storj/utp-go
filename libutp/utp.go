@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1232,17 +1233,17 @@ func (s *Socket) logInfo(fmtString string, args ...interface{}) {
 func registerSentPacket(length int) {
 	if length <= packetSizeMid {
 		if length <= packetSizeEmpty {
-			globalStats.NumRawSend[packetSizeEmptyBucket]++
+			atomic.AddUint32(&globalStats.NumRawSend[packetSizeEmptyBucket], 1)
 		} else if length <= packetSizeSmall {
-			globalStats.NumRawSend[packetSizeSmallBucket]++
+			atomic.AddUint32(&globalStats.NumRawSend[packetSizeSmallBucket], 1)
 		} else {
-			globalStats.NumRawSend[packetSizeMidBucket]++
+			atomic.AddUint32(&globalStats.NumRawSend[packetSizeMidBucket], 1)
 		}
 	} else {
 		if length <= packetSizeBig {
-			globalStats.NumRawSend[packetSizeBigBucket]++
+			atomic.AddUint32(&globalStats.NumRawSend[packetSizeBigBucket], 1)
 		} else {
-			globalStats.NumRawSend[packetSizeHugeBucket]++
+			atomic.AddUint32(&globalStats.NumRawSend[packetSizeHugeBucket], 1)
 		}
 	}
 }
@@ -2122,17 +2123,17 @@ func registerRecvPacket(conn *Socket, length int) {
 
 	if length <= packetSizeMid {
 		if length <= packetSizeEmpty {
-			globalStats.NumRawRecv[packetSizeEmptyBucket]++
+			atomic.AddUint32(&globalStats.NumRawRecv[packetSizeEmptyBucket], 1)
 		} else if length <= packetSizeSmall {
-			globalStats.NumRawRecv[packetSizeSmallBucket]++
+			atomic.AddUint32(&globalStats.NumRawRecv[packetSizeSmallBucket], 1)
 		} else {
-			globalStats.NumRawRecv[packetSizeMidBucket]++
+			atomic.AddUint32(&globalStats.NumRawRecv[packetSizeMidBucket], 1)
 		}
 	} else {
 		if length <= packetSizeBig {
-			globalStats.NumRawRecv[packetSizeBigBucket]++
+			atomic.AddUint32(&globalStats.NumRawRecv[packetSizeBigBucket], 1)
 		} else {
-			globalStats.NumRawRecv[packetSizeHugeBucket]++
+			atomic.AddUint32(&globalStats.NumRawRecv[packetSizeHugeBucket], 1)
 		}
 	}
 }
@@ -3281,8 +3282,14 @@ func (s *Socket) GetDelays() (ours int32, theirs int32, age uint32) {
 
 // GetGlobalStats returns a snapshot of the current GlobalStats counts.
 func GetGlobalStats() GlobalStats {
-	// copy
-	return globalStats
+	var r GlobalStats
+	for i := range r.NumRawRecv {
+		r.NumRawRecv[i] = atomic.LoadUint32(&globalStats.NumRawRecv[i])
+	}
+	for i := range r.NumRawSend {
+		r.NumRawSend[i] = atomic.LoadUint32(&globalStats.NumRawSend[i])
+	}
+	return r
 }
 
 // Close closes the UTP socket.
