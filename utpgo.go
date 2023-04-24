@@ -24,7 +24,7 @@ import (
 )
 
 // Buffer for data before it gets to µTP (there is another "send buffer" in
-// the libutp code, but it is for managing flow control window sizes.
+// the libutp code, but it is for managing flow control window sizes).
 const (
 	readBufferSize  = 200000
 	writeBufferSize = 200000
@@ -156,7 +156,7 @@ func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...Conn
 }
 
 func dial(ctx context.Context, logger logr.Logger, network string, localAddr, remoteAddr *Addr) (*Conn, error) {
-	managerLogger := logger.WithValues("remote-addr", remoteAddr)
+	managerLogger := logger.WithValues("remote-addr", remoteAddr.String())
 	manager, err := newSocketManager(managerLogger, network, (*net.UDPAddr)(localAddr), (*net.UDPAddr)(remoteAddr))
 	if err != nil {
 		return nil, err
@@ -164,7 +164,7 @@ func dial(ctx context.Context, logger logr.Logger, network string, localAddr, re
 	localUDPAddr := manager.LocalAddr().(*net.UDPAddr)
 	// different from managerLogger in case local addr interface and/or port
 	// has been clarified
-	connLogger := logger.WithValues("local-addr", localUDPAddr, "remote-addr", remoteAddr, "dir", "out")
+	connLogger := logger.WithValues("local-addr", localUDPAddr.String(), "remote-addr", remoteAddr.String(), "dir", "out")
 
 	utpConn := &Conn{
 		utpSocket: utpSocket{
@@ -714,17 +714,17 @@ func newSocketManager(logger logr.Logger, network string, localAddr, remoteAddr 
 	}
 
 	udpNetwork := "udp" + network[3:]
-	// thread-safe here; don't need baseConnLock
-	mx := libutp.NewSocketMultiplexer(logger.WithName("mx").WithValues("local-addr", localAddr.String()), nil)
-
 	udpSocket, err := net.ListenUDP(udpNetwork, localAddr)
 	if err != nil {
 		return nil, err
 	}
 
+	// thread-safe here; don't need baseConnLock
+	mx := libutp.NewSocketMultiplexer(logger.WithName("mx").WithValues("local-addr", udpSocket.LocalAddr().String()), nil)
+
 	sm := &socketManager{
 		mx:           mx,
-		logger:       logger.WithName("manager").WithValues("local-addr", udpSocket.LocalAddr()),
+		logger:       logger.WithName("manager").WithValues("local-addr", udpSocket.LocalAddr().String()),
 		udpSocket:    udpSocket,
 		refCount:     1,
 		closeErr:     make(chan error),
@@ -821,7 +821,7 @@ func (sm *socketManager) udpMessageReceiver(ctx context.Context) {
 	// receive buffer twice as big as we thought we might need, and increase it
 	// further from there if needed.
 	bufSize *= 2
-	sm.logger.V(0).Info("udp message receiver started", "receive-buf-size", bufSize, "local-addr", sm.LocalAddr())
+	sm.logger.V(0).Info("udp message receiver started", "receive-buf-size", bufSize)
 	b := make([]byte, bufSize)
 	for {
 		n, _, flags, addr, err := sm.udpSocket.ReadMsgUDP(b, nil)
@@ -840,7 +840,7 @@ func (sm *socketManager) udpMessageReceiver(ctx context.Context) {
 			// do its part instead.
 			continue
 		}
-		sm.logger.V(10).Info("udp received bytes", "len", n, "remote-addr", addr)
+		sm.logger.V(10).Info("udp received bytes", "len", n)
 		sm.processIncomingPacket(b[:n], addr)
 	}
 }
@@ -862,7 +862,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 	}
 	sm.incrementReferences()
 
-	connLogger := sm.logger.WithName("utp-socket").WithValues("dir", "in", "remote-addr", newBaseConn.GetPeerName())
+	connLogger := sm.logger.WithName("utp-socket").WithValues("dir", "in", "remote-addr", newBaseConn.GetPeerName().String())
 	newUTPConn := &Conn{
 		utpSocket: utpSocket{
 			localAddr: sm.LocalAddr().(*net.UDPAddr),
@@ -882,7 +882,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnState:   onStateCallback,
 		OnError:   onErrorCallback,
 	}, newUTPConn)
-	sm.logger.V(1).Info("accepted new connection", "remote-addr", newUTPConn.RemoteAddr())
+	sm.logger.V(1).Info("accepted new connection", "remote-addr", newUTPConn.RemoteAddr().String())
 	select {
 	case sm.acceptChan <- newUTPConn:
 		// it's the socketManager's problem now
@@ -902,7 +902,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 
 func packetSendCallback(userdata interface{}, buf []byte, addr *net.UDPAddr) {
 	sm := userdata.(*socketManager)
-	sm.logger.V(10).Info("udp sending bytes", "len", len(buf), "remote-addr", addr.String())
+	sm.logger.V(10).Info("udp sending bytes", "len", len(buf))
 	_, err := sm.udpSocket.WriteToUDP(buf, addr)
 	if err != nil {
 		sm.registerSocketError(err)
