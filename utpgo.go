@@ -30,7 +30,7 @@ const (
 	writeBufferSize = 200000
 )
 
-var noopLogger = logr.DiscardLogger{}
+var noopLogger = logr.Discard()
 
 type Addr net.UDPAddr
 
@@ -138,7 +138,7 @@ func DialUTP(network string, localAddr, remoteAddr *Addr) (net.Conn, error) {
 
 func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...ConnectOption) (net.Conn, error) {
 	s := utpDialState{
-		logger:    &noopLogger,
+		logger:    noopLogger,
 		ctx:       context.Background(),
 		tlsConfig: nil,
 	}
@@ -231,7 +231,7 @@ func Listen(network string, addr string) (net.Listener, error) {
 
 func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener, error) {
 	s := utpDialState{
-		logger: &noopLogger,
+		logger: noopLogger,
 	}
 	for _, opt := range options {
 		opt.apply(&s)
@@ -256,12 +256,12 @@ func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener
 }
 
 func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
-	return listen(&noopLogger, network, localAddr)
+	return listen(noopLogger, network, localAddr)
 }
 
 func ListenUTPOptions(network string, localAddr *Addr, options ...ConnectOption) (*Listener, error) {
 	s := utpDialState{
-		logger: &noopLogger,
+		logger: noopLogger,
 	}
 	for _, opt := range options {
 		opt.apply(&s)
