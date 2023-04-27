@@ -30,7 +30,7 @@ func main() {
 
 	args := flag.Args()
 	if len(args) < 2 {
-		_, _ = fmt.Fprintf(os.Stderr, `usage: %s listen-addr file-to-send
+		_, _ = fmt.Fprintf(os.Stderr, `usage: %s listen-addr file-to-write
 
    listen-addr: address to listen on, in the form [<host>]:<port>
    file-to-write: where to write the received file
@@ -48,7 +48,7 @@ func main() {
 	logConfig.Level.SetLevel(zap.InfoLevel)
 
 	if *debug {
-		logConfig.Level.SetLevel(zap.DebugLevel)
+		logConfig.Level.SetLevel(-10)
 	}
 	logConfig.Encoding = "console"
 	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
@@ -68,7 +68,7 @@ func main() {
 	defer func() {
 		err := destFile.Close()
 		if err != nil {
-			logger.Fatal("failed to close destination file", zap.Error(err))
+			logger.Error("failed to close destination file", zap.Error(err))
 		}
 	}()
 

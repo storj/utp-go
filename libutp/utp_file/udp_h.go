@@ -198,7 +198,7 @@ var NotAcceptingConnections = errors.New("not accepting connections")
 
 func gotIncomingConnection(userdata interface{}, socket *libutp.Socket) {
 	usm := userdata.(*UDPSocketManager)
-	usm.Logger.V(1).Info("incoming connection received from %v", socket.GetPeerName())
+	usm.Logger.V(1).Info("incoming connection received", "remote-addr", socket.GetPeerName())
 	var err error
 	if usm.OnIncomingConnection != nil {
 		err = usm.OnIncomingConnection(socket)
