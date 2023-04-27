@@ -1,6 +1,9 @@
 // Copyright (C) 2021 Storj Labs, Inc.
 // See LICENSE for copying information.
 
+// This is a port of a file in the C++ libutp library as found in the Transmission app.
+// Copyright (c) 2010 BitTorrent, Inc.
+
 package libutp
 
 import (

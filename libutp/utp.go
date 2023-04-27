@@ -1,6 +1,8 @@
 // Copyright (c) 2021 Storj Labs, Inc.
-// Copyright (c) 2010 BitTorrent, Inc.
 // See LICENSE for copying information.
+
+// This is a port of a file in the C++ libutp library as found in the Transmission app.
+// Copyright (c) 2010 BitTorrent, Inc.
 
 package libutp
 
@@ -63,7 +65,8 @@ const (
 	// removed in this Go transliteration of µTP. Keeping this
 	// constant here so that we can find it in the future and
 	// know which value we're using implicitly.
-	//usePacketPacing = true
+	//
+	//	usePacketPacing = true
 
 	// duplicateAcksBeforeResend controls whether a packet is resent when some
 	// number of duplicate acks have been received.
@@ -75,7 +78,7 @@ const (
 	rstInfoTimeout = 10000
 	rstInfoLimit   = 1000
 
-	// 29 seconds determined from measuring many home NAT devices
+	// 29 seconds determined from measuring many home NAT devices.
 	keepaliveInterval = 29000
 
 	seqNumberMask = 0xFFFF
@@ -136,7 +139,7 @@ type rstInfo struct {
 }
 
 // these packet sizes are including the µTP header which
-// is either 20 or 23 bytes depending on version
+// is either 20 or 23 bytes depending on version.
 const (
 	packetSizeEmptyBucket = 0
 	packetSizeEmpty       = 23
@@ -333,7 +336,7 @@ func (pf *packetFormat) setWindowSize(ws int) {
 	pf.windowSize = byte(divRoundUp(uint32(ws), packetSize))
 }
 
-// use big-endian when encoding to buffer or wire
+// use big-endian when encoding to buffer or wire.
 type packetFormatAck struct {
 	packetFormat
 	extNext byte
@@ -540,7 +543,7 @@ func (pf *packetFormatV1) setWindowSize(ws int) {
 	pf.windowSize = uint32(ws)
 }
 
-// use big-endian when encoding to buffer or wire
+// use big-endian when encoding to buffer or wire.
 type packetFormatAckV1 struct {
 	packetFormatV1
 	extNext byte
@@ -585,7 +588,7 @@ func (pfa *packetFormatAckV1) setExtLen(n uint8) {
 	pfa.extLen = n
 }
 
-// use big-endian when encoding to buffer or wire
+// use big-endian when encoding to buffer or wire.
 type packetFormatExtensionsV1 struct {
 	packetFormatAckV1
 	// (storj): this is meant to overlay and extend packetFormatAckV1.acks as
@@ -618,10 +621,10 @@ type packetFlag int
 
 const (
 	stData  packetFlag = 0 // Data packet.
-	stFin              = 1 // Finalize the connection. This is the last packet.
-	stState            = 2 // State packet. Used to transmit an ACK with no data.
-	stReset            = 3 // Terminate connection forcefully.
-	stSyn              = 4 // Connect SYN
+	stFin   packetFlag = 1 // Finalize the connection. This is the last packet.
+	stState packetFlag = 2 // State packet. Used to transmit an ACK with no data.
+	stReset packetFlag = 3 // Terminate connection forcefully.
+	stSyn   packetFlag = 4 // Connect SYN
 
 	stNumStates = 5 // used for bounds checking
 )
@@ -638,14 +641,14 @@ type connState int
 
 const (
 	csIdle          connState = 0
-	csSynSent                 = 1
-	csConnected               = 2
-	csConnectedFull           = 3
-	csGotFin                  = 4
-	csDestroyDelay            = 5
-	csFinSent                 = 6
-	csReset                   = 7
-	csDestroy                 = 8
+	csSynSent       connState = 1
+	csConnected     connState = 2
+	csConnectedFull connState = 3
+	csGotFin        connState = 4
+	csDestroyDelay  connState = 5
+	csFinSent       connState = 6
+	csReset         connState = 7
+	csDestroy       connState = 8
 )
 
 var connStateNames = []string{
@@ -790,7 +793,7 @@ func (scb *sizableCircularBufferOutgoing) grow(item, index int) {
 // compare if lhs is less than rhs, taking wrapping
 // into account. if lhs is close to math.MaxUint32 and rhs
 // is close to 0, lhs is assumed to have wrapped and
-// considered smaller
+// considered smaller.
 func wrappingCompareLess(lhs, rhs uint32) bool {
 	// distance walking from lhs to rhs, downwards
 	distDown := lhs - rhs
@@ -1135,7 +1138,7 @@ func (s *Socket) getMicroseconds() uint64 {
 	return uint64(s.packetTimeCallback().Microseconds())
 }
 
-// Calculates the current receive window
+// Calculates the current receive window.
 func (s *Socket) getRcvWindow() int {
 	// If we don't have a connection (such as during connection
 	// establishment, always act as if we have an empty buffer).
@@ -1160,7 +1163,7 @@ func (s *Socket) canDecayWin(msec int32) bool {
 	return msec-s.lastRWinDecay >= maxWindowDecay
 }
 
-// If we can, decay max window, returns true if we actually did so
+// If we can, decay max window. Returns true if we actually did so.
 func (s *Socket) maybeDecayWin(currentMS uint32) {
 	if s.canDecayWin(int32(currentMS)) {
 		// TCP uses 0.5
@@ -1219,13 +1222,13 @@ func (s *Socket) GetOverhead() int {
 }
 
 // for better compatibility with old code; it would probably be nice to
-// adapt the old code to use the logr interface instead
+// adapt the old code to use the logr interface instead.
 func (s *Socket) logDebug(fmtString string, args ...interface{}) {
 	s.logger.V(10).Info(fmt.Sprintf(fmtString, args...))
 }
 
 // for better compatibility with old code; it would probably be nice to
-// adapt the old code to use the logr interface instead
+// adapt the old code to use the logr interface instead.
 func (s *Socket) logInfo(fmtString string, args ...interface{}) {
 	s.logger.V(1).Info(fmt.Sprintf(fmtString, args...))
 }
@@ -1325,7 +1328,7 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 		pa.setExt(1)
 		pa.setExtNext(0)
 		pa.setExtLen(4)
-		var m uint32 = 0
+		var m uint32
 
 		// reorder count should only be non-zero
 		// if the packet ackNum + 1 has not yet
@@ -1411,7 +1414,7 @@ func (s *Socket) sendPacket(pkt *outgoingPacket, currentMS uint32) {
 	maxPacketSize := s.GetPacketSize()
 	if pkt.transmissions == 0 && maxSend < maxPacketSize {
 		dumbAssert(s.state == csFinSent || int32(pkt.payload) <= s.sendQuota/100)
-		s.sendQuota = s.sendQuota - int32(pkt.payload*100)
+		s.sendQuota -= int32(pkt.payload * 100)
 	}
 
 	pkt.needResend = false
@@ -1748,7 +1751,7 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 
 	// Close?
 	case csGotFin, csDestroyDelay:
-		if uint(currentMS)-s.rtoTimeout >= 0 {
+		if int(currentMS)-int(s.rtoTimeout) >= 0 {
 			if s.state == csDestroyDelay {
 				s.state = csDestroy
 			} else {
@@ -2052,7 +2055,7 @@ func (s *Socket) applyLEDBATControl(bytesAcked int, actualDelay uint32, minRTT i
 	// This test the connection under heavy load from foreground
 	// traffic. Pretend that our delays are very high to force the
 	// connection to use sub-packet size window sizes
-	//us.ourDelay *= 4
+	// us.ourDelay *= 4
 
 	// target is microseconds
 	target := congestionControlTarget
@@ -2099,7 +2102,7 @@ func (s *Socket) applyLEDBATControl(bytesAcked int, actualDelay uint32, minRTT i
 	if int(scaledGain)+s.maxWindow < minWindowSize {
 		s.maxWindow = minWindowSize
 	} else {
-		s.maxWindow = s.maxWindow + int(scaledGain)
+		s.maxWindow += int(scaledGain)
 	}
 
 	// make sure that the congestion window is below max
@@ -2287,7 +2290,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	if conn.curWindowPackets > 0 {
 		if pkAckNum == ((conn.seqNum-conn.curWindowPackets-1)&ackNumberMask) &&
 			conn.curWindowPackets > 0 {
-			//conn.duplicateAck++
+			// conn.duplicateAck++
 		} else {
 			conn.duplicateAck = 0
 		}
@@ -2364,7 +2367,6 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// hasn't received a sample from us yet, and doesn't
 	// know what it is. We can't update out history unless
 	// we have a true measured sample
-	prevDelayBase = conn.outHist.delayBase
 	if actualDelay != 0 {
 		conn.outHist.addSample(actualDelay, currentMS)
 	}
@@ -2379,7 +2381,9 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// likely shift it back later because of a low latency. This
 	// second shift back would cause us to shift our delay base
 	// which then gets into a death spiral of shifting delay bases
-	/*	if prevDelayBase != 0 &&
+	/*
+		prevDelayBase = conn.outHist.delayBase
+		if prevDelayBase != 0 &&
 			wrappingCompareLess(conn.ourHist.delayBase, prevDelayBase) {
 			// never adjust more than 10 milliseconds
 			if prevDelayBase - conn.ourHist.delayBase <= 10000 {
@@ -2679,7 +2683,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	return packetEnd - data
 }
 
-// this is at best a wild guess
+// this is at best a wild guess.
 func detectVersion(packetBytes []byte) int8 {
 	ver := int8(packetBytes[0] & 0xf)
 	pType := packetFlag(packetBytes[0] >> 4)
@@ -2892,7 +2896,7 @@ func (s *Socket) Connect() {
 	s.connIDRecv = connSeed
 	s.connIDSend = connSeed + 1
 	// if you need compatibility with 1.8.1, use this. it increases attackability though.
-	//conn.seqNum = 1
+	// conn.seqNum = 1
 	s.seqNum = uint16(randomUint32())
 
 	// Create the connect packet.
@@ -2927,7 +2931,7 @@ func (s *Socket) Connect() {
 	pa.setExtNext(0)
 	pa.setExtLen(8)
 
-	//conn.logDebug("Sending connect %s:%d [%d].",
+	// conn.logDebug("Sending connect %s:%d [%d].",
 	//		 conn.addrIP, conn.addrPort, connSeed)
 
 	// Remember the message in the outgoing queue.
@@ -2978,7 +2982,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 
 	flags := ph.getPacketType()
 	for _, conn := range mx.socketMap {
-		//conn.logDebug("Examining Socket %s:%d for %s:%d and (seed:%d s:%d r:%d) for %d",
+		// conn.logDebug("Examining Socket %s:%d for %s:%d and (seed:%d s:%d r:%d) for %d",
 		//		conn.addrIP, conn.addrPort, toIP, toPort, conn.connSeed, conn.connIDSend, conn.connIDRecv, id)
 		if conn.addr.Port != toAddr.Port {
 			continue

@@ -11,11 +11,20 @@ import (
 )
 
 var (
-	IsClosedErr             = errors.New("sync buffer is closed")
-	ReaderAlreadyWaitingErr = errors.New("a reader is already waiting")
-	WriterAlreadyWaitingErr = errors.New("a writer is already waiting")
+	// ErrIsClosed indicates a sync buffer is closed.
+	ErrIsClosed = errors.New("sync buffer is closed")
+	// ErrReaderAlreadyWaiting indicates a reader is already waiting.
+	ErrReaderAlreadyWaiting = errors.New("a reader is already waiting")
+	// ErrWriterAlreadyWaiting indicates a writer is already waiting.
+	ErrWriterAlreadyWaiting = errors.New("a writer is already waiting")
 )
 
+// SyncCircularBuffer represents a synchronous circular buffer. It can be
+// treated like a pipe: write to it, read from it, wait for data to be written,
+// wait for data to be read ("consumed"), wait for space to become available
+// for a write operation, and so on.
+//
+// Once data is consumed from the buffer, its space is released.
 type SyncCircularBuffer struct {
 	lock   sync.Mutex
 	buffer []byte
@@ -33,18 +42,26 @@ type SyncCircularBuffer struct {
 	closedForReads  bool
 }
 
+// NewSyncBuffer creates a new synchronous circular buffer.
 func NewSyncBuffer(size int) *SyncCircularBuffer {
 	return &SyncCircularBuffer{
 		buffer: make([]byte, size),
 	}
 }
 
+// WaitForBytesChan returns a channel that will be written to after n bytes have
+// been written to the buffer and are available for reading. It is possible for
+// another goroutine to read the bytes before the goroutine that is waiting on
+// the channel, so the waiter may need to call this in a loop between read
+// attempts.
+//
+// Only one goroutine can hold the read-waiting channel at a time.
 func (sb *SyncCircularBuffer) WaitForBytesChan(n int) (c <-chan struct{}, cancelWait func(), err error) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
 	if sb.readWaiter != nil {
-		return nil, nil, ReaderAlreadyWaitingErr
+		return nil, nil, ErrReaderAlreadyWaiting
 	}
 	rw := make(chan struct{}, 1)
 	if sb.spaceUsed() >= n {
@@ -57,19 +74,26 @@ func (sb *SyncCircularBuffer) WaitForBytesChan(n int) (c <-chan struct{}, cancel
 	return sb.readWaiter, func() { sb.cancelReadWait(rw) }, nil
 }
 
+// WaitForSpaceChan returns a channel that will be written to when there are n
+// bytes of space available for writing. It is possible for another goroutine to
+// write and use up those bytes before the goroutine that is waiting on the
+// channel, so the waiter may need to call this in a loop between write
+// attempts.
+//
+// Only one goroutine can hold the write-waiting channel at a time.
 func (sb *SyncCircularBuffer) WaitForSpaceChan(n int) (c <-chan struct{}, cancelWait func(), err error) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
 
 	if sb.closedForWrites {
-		return nil, nil, IsClosedErr
+		return nil, nil, ErrIsClosed
 	}
 	return sb.waitForSpaceChan(n)
 }
 
 func (sb *SyncCircularBuffer) waitForSpaceChan(n int) (c <-chan struct{}, cancelWait func(), err error) {
 	if sb.writeWaiter != nil {
-		return nil, nil, WriterAlreadyWaitingErr
+		return nil, nil, ErrWriterAlreadyWaiting
 	}
 	ww := make(chan struct{}, 1)
 	if sb.spaceAvailable() >= n {
@@ -100,13 +124,15 @@ func (sb *SyncCircularBuffer) cancelReadWait(waitChan <-chan struct{}) {
 	}
 }
 
+// Append synchronously writes to the buffer, blocking if necessary until there
+// is enough space in the buffer for the data to be written all at once.
 func (sb *SyncCircularBuffer) Append(ctx context.Context, data []byte) error {
 	for {
 		if ok := sb.TryAppend(data); ok {
 			return nil
 		}
 		if sb.closedForWrites {
-			return IsClosedErr
+			return ErrIsClosed
 		}
 
 		waitForSpace, cancelWait, err := sb.WaitForSpaceChan(len(data))
@@ -120,19 +146,22 @@ func (sb *SyncCircularBuffer) Append(ctx context.Context, data []byte) error {
 			return ctx.Err()
 		case _, ok := <-waitForSpace:
 			if !ok {
-				return IsClosedErr
+				return ErrIsClosed
 			}
 		}
 	}
 }
 
+// Consume synchronously reads from the buffer, blocking if necessary until
+// there are bytes available to read. This may read less than len(data) bytes,
+// if the full requested amount is not available.
 func (sb *SyncCircularBuffer) Consume(ctx context.Context, data []byte) (n int, err error) {
 	for {
 		if n, ok := sb.TryConsume(data); ok {
 			return n, nil
 		}
 		if sb.closedForReads {
-			return 0, IsClosedErr
+			return 0, ErrIsClosed
 		}
 		waitChan, cancelWait, err := sb.WaitForBytesChan(1)
 		if err != nil {
@@ -145,19 +174,21 @@ func (sb *SyncCircularBuffer) Consume(ctx context.Context, data []byte) (n int, 
 			return 0, ctx.Err()
 		case _, ok := <-waitChan:
 			if !ok {
-				return 0, IsClosedErr
+				return 0, ErrIsClosed
 			}
 		}
 	}
 }
 
+// ConsumeFull synchronously reads from the buffer, blocking if necessary until
+// there are enough bytes available to read and fill the whole data slice.
 func (sb *SyncCircularBuffer) ConsumeFull(ctx context.Context, data []byte) error {
 	for {
 		if ok := sb.TryConsumeFull(data); ok {
 			return nil
 		}
 		if sb.closedForReads {
-			return IsClosedErr
+			return ErrIsClosed
 		}
 
 		waitChan, cancelWait, err := sb.WaitForBytesChan(len(data))
@@ -171,12 +202,17 @@ func (sb *SyncCircularBuffer) ConsumeFull(ctx context.Context, data []byte) erro
 			return ctx.Err()
 		case _, ok := <-waitChan:
 			if !ok {
-				return IsClosedErr
+				return ErrIsClosed
 			}
 		}
 	}
 }
 
+// TryAppend tries to write to the buffer. Does not block.
+//
+// If there is not enough space to write data all at once, the buffer is
+// untouched, and false is returned. Data is always written atomically as a
+// whole slice.
 func (sb *SyncCircularBuffer) TryAppend(data []byte) (ok bool) {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -302,7 +338,7 @@ func (sb *SyncCircularBuffer) popFromBuffer(data []byte) {
 	}
 }
 
-// lock must be held before calling
+// lock must be held before calling.
 func (sb *SyncCircularBuffer) cancelWaiters() {
 	if sb.writeWaiter != nil {
 		// cancel any pending write
@@ -316,17 +352,25 @@ func (sb *SyncCircularBuffer) cancelWaiters() {
 	}
 }
 
+// FlushAndClose flushes the buffer. This involves closing the buffer for
+// writes, waiting until all data has been read, and then closing the
+// buffer entirely. A goroutine waiting to write data to the buffer
+// will have ErrIsClosed returned.
 func (sb *SyncCircularBuffer) FlushAndClose() {
 	var waitChan <-chan struct{}
 	func() {
 		sb.lock.Lock()
 		defer sb.lock.Unlock()
 
-		sb.cancelWaiters()
+		if sb.writeWaiter != nil {
+			// cancel any pending write
+			close(sb.writeWaiter)
+			sb.writeWaiter = nil
+		}
 		sb.closedForWrites = true
 		// (but we remain open for reads for now)
 
-		// model this as waiting for a write the size of the entire buffer
+		// model this as waiting for space for a write the size of the entire buffer
 		var err error
 		waitChan, _, err = sb.waitForSpaceChan(len(sb.buffer))
 		if err != nil {
@@ -338,6 +382,8 @@ func (sb *SyncCircularBuffer) FlushAndClose() {
 	sb.Close()
 }
 
+// Clear clears the contents of a buffer, canceling any waiters and resetting
+// the buffer back to its zero state.
 func (sb *SyncCircularBuffer) Clear() {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -357,6 +403,9 @@ func (sb *SyncCircularBuffer) Clear() {
 	}
 }
 
+// Close closes the buffer for both reading and writing. Any waiters are
+// canceled and will have ErrIsClosed returned. Further attempts to read
+// or write will also have ErrIsClosed returned.
 func (sb *SyncCircularBuffer) Close() {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -367,6 +416,9 @@ func (sb *SyncCircularBuffer) Close() {
 	sb.closedForWrites = true
 }
 
+// CloseForWrites closes the buffer for writes. Any goroutine waiting to write
+// or attempting to write after this point will have ErrIsClosed returned. Reads
+// will still be allowed.
 func (sb *SyncCircularBuffer) CloseForWrites() {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -380,6 +432,11 @@ func (sb *SyncCircularBuffer) CloseForWrites() {
 	// but remain open for reads in case there is anything left in the buffer.
 }
 
+// SpaceAvailable returns a snapshot of the amount of space available in the
+// buffer. Since the caller does not hold the lock, it is possible that the
+// amount of space has changed by the time this function returns. The returned
+// value should be treated as advisory only, unless the caller has other means
+// of arranging for both reads and writes to be disallowed.
 func (sb *SyncCircularBuffer) SpaceAvailable() int {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()
@@ -394,6 +451,11 @@ func (sb *SyncCircularBuffer) spaceAvailable() int {
 	return len(sb.buffer) - sb.end + sb.start
 }
 
+// SpaceUsed returns a snapshot of the amount of space used in the buffer.
+// Since the caller does not hold the lock, it is possible that the amount of
+// space used has changed by the time this function returns. The returned
+// value should be treated as advisory only, unless the caller has other means
+// of arranging for both reads and writes to be disallowed.
 func (sb *SyncCircularBuffer) SpaceUsed() int {
 	sb.lock.Lock()
 	defer sb.lock.Unlock()

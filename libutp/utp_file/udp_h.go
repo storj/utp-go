@@ -1,6 +1,9 @@
 // Copyright (C) 2021 Storj Labs, Inc.
 // See LICENSE for copying information.
 
+// This is a port of a file in the C++ libutp library as found in the Transmission app.
+// Copyright (c) 2010 BitTorrent, Inc.
+
 package utp_file
 
 import (
@@ -16,8 +19,10 @@ import (
 	"storj.io/utp-go/libutp"
 )
 
+// MaxOutgoingQueueSize is the maximum size of the outgoing queue.
 const MaxOutgoingQueueSize = 32
 
+// MakeSocket creates a new UDP socket.
 func MakeSocket(addr string) (*net.UDPConn, error) {
 	sock, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -42,11 +47,13 @@ func MakeSocket(addr string) (*net.UDPConn, error) {
 	return udpSock, nil
 }
 
+// UDPOutgoing represents an outgoing message, with contents and a destination address.
 type UDPOutgoing struct {
 	to  *net.UDPAddr
 	mem []byte
 }
 
+// UDPSocketManager keeps track of a UDP socket.
 type UDPSocketManager struct {
 	*libutp.SocketMultiplexer
 	socket               *net.UDPConn
@@ -55,6 +62,7 @@ type UDPSocketManager struct {
 	OnIncomingConnection func(*libutp.Socket) error
 }
 
+// NewUDPSocketManager creates a new UDPSocketManager.
 func NewUDPSocketManager(logger logr.Logger) *UDPSocketManager {
 	return &UDPSocketManager{
 		SocketMultiplexer: libutp.NewSocketMultiplexer(logger, nil),
@@ -62,6 +70,7 @@ func NewUDPSocketManager(logger logr.Logger) *UDPSocketManager {
 	}
 }
 
+// SetSocket sets the socket to be associated with a UDPSocketManager.
 func (usm *UDPSocketManager) SetSocket(sock *net.UDPConn) {
 	if usm.socket != nil && usm.socket != sock {
 		if err := usm.socket.Close(); err != nil {
@@ -71,6 +80,8 @@ func (usm *UDPSocketManager) SetSocket(sock *net.UDPConn) {
 	usm.socket = sock
 }
 
+// Flush writes any pending outgoing messages to the UDP socket until an error
+// is encountered or until there are no more pending outgoing messages.
 func (usm *UDPSocketManager) Flush() {
 	for len(usm.outQueue) > 0 {
 		uo := usm.outQueue[0]
@@ -81,9 +92,12 @@ func (usm *UDPSocketManager) Flush() {
 			usm.Logger.Error(err, "sendto failed")
 			break
 		}
+		usm.outQueue = usm.outQueue[1:]
 	}
 }
 
+// Select blocks until data can be read from the UDP socket, or until blockTime
+// has elapsed. Any available data is passed on to the µTP mechanism.
 func (usm *UDPSocketManager) Select(blockTime time.Duration) error {
 	socketRawConn, err := usm.socket.SyscallConn()
 	if err != nil {
@@ -106,7 +120,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 		fds[0] = unix.PollFd{Fd: socketFd, Events: unix.POLLIN}
 		n, err := unix.Poll(fds[:], int(time.Until(timeoutTime).Milliseconds()))
 		if err != nil || n == 0 {
-			if err == syscall.EINTR {
+			if errors.Is(err, syscall.EINTR) {
 				continue
 			}
 			return err
@@ -122,7 +136,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 				// ECONNRESET - On a UDP-datagram socket
 				// this error indicates a previous send operation
 				// resulted in an ICMP Port Unreachable message.
-				if err == syscall.ECONNRESET {
+				if errors.Is(err, syscall.ECONNRESET) {
 					// (storj): do we have a way to know which previous send
 					// operation? or a way to tie it to an existing connection,
 					// so we can pass the error on?
@@ -132,7 +146,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 				// EMSGSIZE - The message was too large to fit into
 				// the buffer pointed to by the buf parameter and was
 				// truncated.
-				if err == syscall.EMSGSIZE {
+				if errors.Is(err, syscall.EMSGSIZE) {
 					// (storj): this seems like a big huge hairy deal. the code
 					// shouldn't allow this to happen, and if it does, won't
 					// all subsequent traffic be potentially wrong?
@@ -161,6 +175,7 @@ func sendTo(userdata interface{}, p []byte, addr *net.UDPAddr) {
 	userdata.(*UDPSocketManager).Send(p, addr)
 }
 
+// Send arranges for data to be sent over µTP on the UDP socket.
 func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 	if len(p) > int(libutp.GetUDPMTU(addr)) {
 		panic("given packet is too big")
@@ -187,6 +202,7 @@ func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 	}
 }
 
+// Close closes the UDP socket.
 func (usm *UDPSocketManager) Close() error {
 	err := usm.socket.Close()
 	usm.socket = nil
@@ -194,7 +210,8 @@ func (usm *UDPSocketManager) Close() error {
 	return err
 }
 
-var NotAcceptingConnections = errors.New("not accepting connections")
+// ErrNotAcceptingConnections indicates that a socket is not accepting connections.
+var ErrNotAcceptingConnections = errors.New("not accepting connections")
 
 func gotIncomingConnection(userdata interface{}, socket *libutp.Socket) {
 	usm := userdata.(*UDPSocketManager)
@@ -203,7 +220,7 @@ func gotIncomingConnection(userdata interface{}, socket *libutp.Socket) {
 	if usm.OnIncomingConnection != nil {
 		err = usm.OnIncomingConnection(socket)
 	} else {
-		err = NotAcceptingConnections
+		err = ErrNotAcceptingConnections
 	}
 	if err != nil {
 		usm.Logger.Error(err, "rejecting connection")
