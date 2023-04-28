@@ -49,7 +49,7 @@ func main() {
 	logConfig := zap.NewDevelopmentConfig()
 	logConfig.Level.SetLevel(zap.InfoLevel)
 	if *debug {
-		logConfig.Level.SetLevel(zap.DebugLevel)
+		logConfig.Level.SetLevel(-10)
 	}
 	logConfig.Encoding = "console"
 	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
