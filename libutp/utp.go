@@ -109,9 +109,6 @@ func NewSocketMultiplexer(logger logr.Logger, packetTimeCallback func() time.Dur
 		createTime := time.Now()
 		packetTimeCallback = func() time.Duration { return time.Since(createTime) }
 	}
-	if logger == nil {
-		logger = &logr.DiscardLogger{}
-	}
 	return &SocketMultiplexer{
 		logger:             logger,
 		packetTimeCallback: packetTimeCallback,
@@ -2848,9 +2845,6 @@ func (s *Socket) SetSockOpt(opt, val int) bool {
 // SetLogger sets a new logger for the socket. If logger is nil, a no-op
 // logger will be used.
 func (s *Socket) SetLogger(logger logr.Logger) {
-	if logger == nil {
-		logger = &logr.DiscardLogger{}
-	}
 	s.logger = logger
 }
 

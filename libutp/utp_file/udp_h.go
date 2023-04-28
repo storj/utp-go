@@ -206,7 +206,6 @@ func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 func (usm *UDPSocketManager) Close() error {
 	err := usm.socket.Close()
 	usm.socket = nil
-	usm.Logger = nil
 	return err
 }
 

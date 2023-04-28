@@ -30,7 +30,7 @@ const (
 	writeBufferSize = 200000
 )
 
-var noopLogger = logr.DiscardLogger{}
+var noopLogger = logr.Discard()
 
 // Addr represents a µTP address.
 type Addr net.UDPAddr
@@ -153,7 +153,7 @@ func DialUTP(network string, localAddr, remoteAddr *Addr) (net.Conn, error) {
 // local and remote address endpoints and the given options.
 func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...ConnectOption) (net.Conn, error) {
 	s := utpDialState{
-		logger:    &noopLogger,
+		logger:    noopLogger,
 		ctx:       context.Background(),
 		tlsConfig: nil,
 	}
@@ -250,7 +250,7 @@ func Listen(network string, addr string) (net.Listener, error) {
 // the given options.
 func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener, error) {
 	s := utpDialState{
-		logger: &noopLogger,
+		logger: noopLogger,
 	}
 	for _, opt := range options {
 		opt.apply(&s)
@@ -277,14 +277,14 @@ func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener
 // ListenUTP creates a listening µTP socket on the local network address. It is
 // analogous to net.ListenUDP.
 func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
-	return listen(&noopLogger, network, localAddr)
+	return listen(noopLogger, network, localAddr)
 }
 
 // ListenUTPOptions creates a listening µTP socket on the given local network
 // address and with the given options.
 func ListenUTPOptions(network string, localAddr *Addr, options ...ConnectOption) (*Listener, error) {
 	s := utpDialState{
-		logger: &noopLogger,
+		logger: noopLogger,
 	}
 	for _, opt := range options {
 		opt.apply(&s)
