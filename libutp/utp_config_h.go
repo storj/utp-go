@@ -1,6 +1,9 @@
 // Copyright (c) 2021 Storj Labs, Inc.
 // See LICENSE for copying information.
 
+// This is a port of a file in the C++ libutp library as found in the Transmission app.
+// Copyright (c) 2010 BitTorrent, Inc.
+
 package libutp
 
 const (
@@ -29,7 +32,7 @@ type BandwidthType int
 
 const (
 	// PayloadBandwidth is the class of data which was directly specified by
-	// the application layer. That is to say, this is application data.`
+	// the application layer. That is to say, this is application data.
 	PayloadBandwidth BandwidthType = iota
 	// ConnectOverhead is the class of data used for bytes which are used to
 	// negotiate connections with a remote peer.

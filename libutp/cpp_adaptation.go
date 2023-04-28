@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// this is pretty dumb, but just for the sake of an easier port
+// this is pretty dumb, but just for the sake of an easier port.
 func dumbAssert(val bool) {
 	if val {
 		return
@@ -43,7 +43,7 @@ func dumbAssert(val bool) {
 	panic("failed assertion, and can't get caller info")
 }
 
-// lol memory efficiency
+// lol memory efficiency.
 func readLineFromFile(filePath string, lineNum int) string {
 	if lineNum == 0 {
 		return ""

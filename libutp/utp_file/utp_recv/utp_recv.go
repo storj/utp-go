@@ -1,6 +1,9 @@
 // Copyright (c) 2021 Storj Labs, Inc.
 // See LICENSE for copying information.
 
+// This is a port of a file in the C++ libutp library as found in the Transmission app.
+// Copyright (c) 2010 BitTorrent, Inc.
+
 package main
 
 import (
@@ -73,6 +76,9 @@ func main() {
 	}()
 
 	fsr, err := newFileStreamReceiver(logger, listenAddr, destFile)
+	if err != nil {
+		logger.Fatal("could not create new fileStreamReceiver", zap.Error(err))
+	}
 	defer func() {
 		if err := fsr.Close(); err != nil {
 			logger.Error("failed to close fileStreamReceiver", zap.Error(err))

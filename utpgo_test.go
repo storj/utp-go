@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	// use -10 for the most detail
+	// use -10 for the most detail.
 	logLevel = 0
 	repeats  = 20
 )
@@ -121,7 +121,7 @@ func readContextFull(ctx context.Context, r contextReader, buf []byte) (n int, e
 		n, err = r.ReadContext(ctx, buf[gotBytes:])
 		gotBytes += n
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				err = nil
 			}
 			return gotBytes, err
@@ -129,6 +129,8 @@ func readContextFull(ctx context.Context, r contextReader, buf []byte) (n int, e
 	}
 	return len(buf), nil
 }
+
+const dataBlobSize = 2048
 
 func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 	defer func() {
@@ -138,7 +140,7 @@ func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 		}
 	}()
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, dataBlobSize)
 	_, err = readContextFull(ctx, conn, buf)
 	if err != nil {
 		_, _ = conn.WriteContext(ctx, []byte{0x1})
@@ -182,24 +184,27 @@ func makeConn(ctx context.Context, logger logr.Logger, addr net.Addr) (err error
 	}()
 
 	// do the things
-	data := make([]byte, 2048)
-	_, err = io.ReadFull(rand.Reader, data)
+	data := make([]byte, dataBlobSize+sha512.Size)
+	_, err = io.ReadFull(rand.Reader, data[:dataBlobSize])
 	if err != nil {
 		return err
 	}
-	hashOfData := sha512.Sum512(data)
-	both := append(data, hashOfData[:]...)
-	logger.Info("writing bytes", "len", len(both))
-	n, err := conn.WriteContext(ctx, both)
+	hashOfData := sha512.Sum512(data[:dataBlobSize])
+	copy(data[dataBlobSize:], hashOfData[:])
+	logger.Info("writing bytes", "len", len(data))
+	n, err := conn.WriteContext(ctx, data)
 	if err != nil {
 		return err
 	}
-	if n < len(both) {
-		return fmt.Errorf("short write: %d < %d", n, len(both))
+	if n < len(data) {
+		return fmt.Errorf("short write: %d < %d", n, len(data))
 	}
 	n, err = conn.ReadContext(ctx, data[:1])
 	if err != nil {
 		return err
+	}
+	if n < len(data)-1 {
+		return fmt.Errorf("short read: %d < %d", n, len(data)-1)
 	}
 	if int(data[0]) != 0xcc {
 		return fmt.Errorf("got %x response from remote instead of cc", int(data[0]))

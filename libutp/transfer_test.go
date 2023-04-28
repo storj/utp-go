@@ -1,10 +1,13 @@
 // Copyright (c) 2021 Storj Labs, Inc.
-// Copyright (c) 2010 BitTorrent, Inc.
 // See LICENSE for copying information.
+
+// This is a port of a file in the C++ libutp library as found in the Transmission app.
+// Copyright (c) 2010 BitTorrent, Inc.
 
 package libutp
 
 import (
+	"errors"
 	"math/rand"
 	"net"
 	"sort"
@@ -395,7 +398,7 @@ func (us *testUTPSocket) onUTPState(userdata interface{}, state State) {
 
 func (us *testUTPSocket) onUTPError(userdata interface{}, err error) {
 	us.t.Logf("UTP ERROR for socket %s: %v", us.sock.addr.String(), err)
-	if !us.ignoreReset || err == syscall.ECONNRESET {
+	if !us.ignoreReset || !errors.Is(err, syscall.ECONNRESET) {
 		us.t.Fatalf("should not have gotten error: %v", err)
 	}
 	us.close()

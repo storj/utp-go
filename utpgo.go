@@ -32,11 +32,16 @@ const (
 
 var noopLogger = logr.DiscardLogger{}
 
+// Addr represents a µTP address.
 type Addr net.UDPAddr
 
+// Network returns the network of the address ("utp").
 func (a *Addr) Network() string { return "utp" }
-func (a *Addr) String() string  { return (*net.UDPAddr)(a).String() }
 
+// String returns the address formatted as a string.
+func (a *Addr) String() string { return (*net.UDPAddr)(a).String() }
+
+// Conn represents a µTP connection.
 type Conn struct {
 	utpSocket
 
@@ -84,6 +89,7 @@ type Conn struct {
 	connectChan chan struct{}
 }
 
+// Listener represents a listening µTP socket.
 type Listener struct {
 	utpSocket
 
@@ -111,14 +117,19 @@ type utpSocket struct {
 	encounteredError error
 }
 
+// Dial attempts to make an outgoing µTP connection to the given address. It is
+// analogous to net.Dial.
 func Dial(network, address string) (net.Conn, error) {
 	return DialOptions(network, address)
 }
 
+// DialContext attempts to make an outgoing µTP connection to the given address.
 func DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return DialOptions(network, address, WithContext(ctx))
 }
 
+// DialOptions attempts to make an outgoing µTP connection to the given address
+// with the given options.
 func DialOptions(network, address string, options ...ConnectOption) (net.Conn, error) {
 	switch network {
 	case "utp", "utp4", "utp6":
@@ -132,10 +143,14 @@ func DialOptions(network, address string, options ...ConnectOption) (net.Conn, e
 	return DialUTPOptions(network, nil, rAddr, options...)
 }
 
+// DialUTP attempts to make an outgoing µTP connection with the given local
+// and remote address endpoints. It is analogous to net.DialUDP.
 func DialUTP(network string, localAddr, remoteAddr *Addr) (net.Conn, error) {
 	return DialUTPOptions(network, localAddr, remoteAddr)
 }
 
+// DialUTPOptions attempts to make an outgoing µTP connection with the given
+// local and remote address endpoints and the given options.
 func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...ConnectOption) (net.Conn, error) {
 	s := utpDialState{
 		logger:    &noopLogger,
@@ -225,10 +240,14 @@ func dial(ctx context.Context, logger logr.Logger, network string, localAddr, re
 	return utpConn, nil
 }
 
+// Listen creates a listening µTP socket on the local network address. It is
+// analogous to net.Listen.
 func Listen(network string, addr string) (net.Listener, error) {
 	return ListenOptions(network, addr)
 }
 
+// ListenOptions creates a listening µTP socket on the local network address with
+// the given options.
 func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener, error) {
 	s := utpDialState{
 		logger: &noopLogger,
@@ -255,10 +274,14 @@ func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener
 	return listener, nil
 }
 
+// ListenUTP creates a listening µTP socket on the local network address. It is
+// analogous to net.ListenUDP.
 func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
 	return listen(&noopLogger, network, localAddr)
 }
 
+// ListenUTPOptions creates a listening µTP socket on the given local network
+// address and with the given options.
 func ListenUTPOptions(network string, localAddr *Addr, options ...ConnectOption) (*Listener, error) {
 	s := utpDialState{
 		logger: &noopLogger,
@@ -292,6 +315,7 @@ type utpDialState struct {
 	tlsConfig *tls.Config
 }
 
+// ConnectOption is the interface which connection options should implement.
 type ConnectOption interface {
 	apply(s *utpDialState)
 }
@@ -304,6 +328,9 @@ func (o *optionLogger) apply(s *utpDialState) {
 	s.logger = o.logger
 }
 
+// WithLogger creates a connection option which specifies a logger to be
+// attached to the connection. The logger will receive debugging messages
+// about the socket.
 func WithLogger(logger logr.Logger) ConnectOption {
 	return &optionLogger{logger: logger}
 }
@@ -316,6 +343,9 @@ func (o *optionContext) apply(s *utpDialState) {
 	s.ctx = o.ctx
 }
 
+// WithContext creates a connection option which specifies a context to be
+// attached to the connection. If the context is closed, the dial operation
+// will be canceled.
 func WithContext(ctx context.Context) ConnectOption {
 	return &optionContext{ctx: ctx}
 }
@@ -328,10 +358,14 @@ func (o *optionTLS) apply(s *utpDialState) {
 	s.tlsConfig = o.tlsConfig
 }
 
+// WithTLS creates a connection option which specifies a TLS configuration
+// structure to be attached to the connection. If specified, a TLS layer
+// will be established on the connection before Dial returns.
 func WithTLS(tlsConfig *tls.Config) ConnectOption {
 	return &optionTLS{tlsConfig: tlsConfig}
 }
 
+// Close closes a connection.
 func (c *Conn) Close() error {
 	// indicate our desire to close; once buffers are flushed, we can continue
 	c.stateLock.Lock()
@@ -372,10 +406,13 @@ func (c *Conn) Close() error {
 	return err
 }
 
+// SetLogger sets the logger to be used by a connection. The logger will receive
+// debugging information about the socket.
 func (c *Conn) SetLogger(logger logr.Logger) {
 	c.baseConn.SetLogger(logger)
 }
 
+// Read reads from a Conn.
 func (c *Conn) Read(buf []byte) (n int, err error) {
 	return c.ReadContext(context.Background(), buf)
 }
@@ -383,7 +420,7 @@ func (c *Conn) Read(buf []byte) (n int, err error) {
 func (c *Conn) stateEnterRead() error {
 	switch {
 	case c.readPending:
-		return buffers.ReaderAlreadyWaitingErr
+		return buffers.ErrReaderAlreadyWaiting
 	case c.willClose:
 		return c.makeOpError("read", net.ErrClosed)
 	case c.remoteIsDone && c.readBuffer.SpaceUsed() == 0:
@@ -393,6 +430,7 @@ func (c *Conn) stateEnterRead() error {
 	return nil
 }
 
+// ReadContext reads from a Conn.
 func (c *Conn) ReadContext(ctx context.Context, buf []byte) (n int, err error) {
 	c.stateLock.Lock()
 	encounteredErr := c.encounteredError
@@ -449,27 +487,29 @@ func (c *Conn) ReadContext(ctx context.Context, buf []byte) (n int, err error) {
 	}
 }
 
+// Write writes to a Conn.
 func (c *Conn) Write(buf []byte) (n int, err error) {
 	return c.WriteContext(context.Background(), buf)
 }
 
+// WriteContext writes to a Conn.
 func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) {
 	c.stateLock.Lock()
 	if c.writePending {
 		c.stateLock.Unlock()
-		return 0, buffers.WriterAlreadyWaitingErr
+		return 0, buffers.ErrWriterAlreadyWaiting
 	}
 	c.writePending = true
 	deadline := c.writeDeadline
 	c.stateLock.Unlock()
 
 	if err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// remote side closed connection cleanly, and µTP in/out streams
 			// are not independently closeable. Doesn't make sense to return
 			// an EOF from a Write method, so..
 			err = c.makeOpError("write", syscall.ECONNRESET)
-		} else if err == net.ErrClosed {
+		} else if errors.Is(err, net.ErrClosed) {
 			err = c.makeOpError("write", net.ErrClosed)
 		}
 		return 0, err
@@ -523,7 +563,7 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 
 		waitChan, cancelWait, err := c.writeBuffer.WaitForSpaceChan(len(buf))
 		if err != nil {
-			if err == buffers.IsClosedErr {
+			if errors.Is(err, buffers.ErrIsClosed) {
 				err = c.makeOpError("write", c.encounteredError)
 			}
 			return 0, err
@@ -549,11 +589,13 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 	}
 }
 
+// RemoteAddr returns the address of the connection peer.
 func (c *Conn) RemoteAddr() net.Addr {
 	// GetPeerName is thread-safe
 	return (*Addr)(c.baseConn.GetPeerName())
 }
 
+// SetReadDeadline sets a read deadline for future read operations.
 func (c *Conn) SetReadDeadline(t time.Time) error {
 	c.stateLock.Lock()
 	defer c.stateLock.Unlock()
@@ -561,6 +603,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
+// SetWriteDeadline sets a write deadline for future write operations.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	c.stateLock.Lock()
 	defer c.stateLock.Unlock()
@@ -568,6 +611,7 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+// SetDeadline sets a deadline for future read and write operations.
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.stateLock.Lock()
 	defer c.stateLock.Unlock()
@@ -577,7 +621,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 }
 
 func (c *Conn) makeOpError(op string, err error) error {
-	opErr := c.utpSocket.makeOpError(op, err).(*net.OpError)
+	opErr := c.utpSocket.makeOpError(op, err).(*net.OpError) //nolint: errorlint
 	opErr.Source = opErr.Addr
 	opErr.Addr = c.RemoteAddr()
 	return opErr
@@ -585,6 +629,7 @@ func (c *Conn) makeOpError(op string, err error) error {
 
 var _ net.Conn = &Conn{}
 
+// AcceptUTPContext accepts a new µTP connection on a listening socket.
 func (l *Listener) AcceptUTPContext(ctx context.Context) (*Conn, error) {
 	select {
 	case newConn, ok := <-l.acceptChan:
@@ -601,22 +646,27 @@ func (l *Listener) AcceptUTPContext(ctx context.Context) (*Conn, error) {
 	}
 }
 
+// AcceptUTP accepts a new µTP connection on a listening socket.
 func (l *Listener) AcceptUTP() (*Conn, error) {
 	return l.AcceptUTPContext(context.Background())
 }
 
+// Accept accepts a new µTP connection on a listening socket.
 func (l *Listener) Accept() (net.Conn, error) {
 	return l.AcceptUTP()
 }
 
+// AcceptContext accepts a new µTP connection on a listening socket.
 func (l *Listener) AcceptContext(ctx context.Context) (net.Conn, error) {
 	return l.AcceptUTPContext(ctx)
 }
 
+// Close closes a Listener.
 func (l *Listener) Close() error {
 	return l.utpSocket.Close()
 }
 
+// Addr returns the local address of a Listener.
 func (l *Listener) Addr() net.Addr {
 	return l.utpSocket.LocalAddr()
 }
@@ -994,7 +1044,7 @@ func (c *Conn) onConnectionFailure(err error) {
 	c.stateDebugLog("finishing onConnectionFailure")
 }
 
-// the baseConnLock should already be held when this callback is entered
+// the baseConnLock should already be held when this callback is entered.
 func onStateCallback(userdata interface{}, state libutp.State) {
 	c := userdata.(*Conn)
 	switch state {
@@ -1009,7 +1059,7 @@ func onStateCallback(userdata interface{}, state libutp.State) {
 
 // This could be ECONNRESET, ECONNREFUSED, or ETIMEDOUT.
 //
-// the baseConnLock should already be held when this callback is entered
+// the baseConnLock should already be held when this callback is entered.
 func onErrorCallback(userdata interface{}, err error) {
 	c := userdata.(*Conn)
 	c.logger.Error(err, "onError callback from libutp layer")
@@ -1027,6 +1077,7 @@ func onErrorCallback(userdata interface{}, err error) {
 	}
 }
 
+// ResolveUTPAddr resolves a µTP address. It is analogous to net.ResolveUDPAddr.
 func ResolveUTPAddr(network, address string) (*Addr, error) {
 	switch network {
 	case "utp", "utp4", "utp6":
