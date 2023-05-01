@@ -459,7 +459,9 @@ func (c *Conn) ReadContext(ctx context.Context, buf []byte) (n int, err error) {
 			if n == 0 {
 				return 0, io.EOF
 			}
+			c.manager.baseConnLock.Lock()
 			c.baseConn.RBDrained()
+			c.manager.baseConnLock.Unlock()
 			return n, nil
 		}
 		if encounteredErr != nil {
