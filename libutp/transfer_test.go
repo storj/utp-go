@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
@@ -188,7 +187,7 @@ type testScenario struct {
 }
 
 func newTestScenario(t testing.TB) *testScenario {
-	logger := zapr.NewLogger(zaptest.NewLogger(t))
+	logger := zaptest.NewLogger(t)
 	scenario := &testScenario{}
 	scenario.mx = NewSocketMultiplexer(logger, scenario.getTime)
 
