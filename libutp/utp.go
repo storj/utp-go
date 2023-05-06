@@ -2408,9 +2408,9 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		conn.maxWindowUser = p.getWindowSize()
 
 		// If max user window is set to 0, then we startup a timer
-		// That will reset it to 1 after 15 seconds.
+		// That will reset it to packetSize after 15 seconds.
 		if conn.maxWindowUser == 0 {
-			// Reset maxWindowUser to 1 every 15 seconds.
+			// Reset maxWindowUser to packetSize every 15 seconds.
 			conn.zeroWindowTime = currentMS + 15000
 		}
 
