@@ -28,9 +28,15 @@ import (
 const (
 	readBufferSize  = 200000
 	writeBufferSize = 200000
+
+	// Make the read buffer larger than advertised, so that surplus bytes can be
+	// handled under certain conditions.
+	receiveBufferMultiplier = 2
 )
 
 var noopLogger = zap.NewNop()
+
+var ErrReceiveBufferOverflow = fmt.Errorf("receive buffer overflow")
 
 // Addr represents a µTP address.
 type Addr net.UDPAddr
@@ -191,7 +197,7 @@ func dial(ctx context.Context, logger *zap.Logger, network string, localAddr, re
 		connectChan:       make(chan struct{}),
 		closeChan:         make(chan struct{}),
 		baseConnDestroyed: make(chan struct{}),
-		readBuffer:        buffers.NewSyncBuffer(readBufferSize),
+		readBuffer:        buffers.NewSyncBuffer(readBufferSize * receiveBufferMultiplier),
 		writeBuffer:       buffers.NewSyncBuffer(writeBufferSize),
 	}
 	connLogger.Debug("creating outgoing socket")
@@ -926,7 +932,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		baseConn:          newBaseConn,
 		closeChan:         make(chan struct{}),
 		baseConnDestroyed: make(chan struct{}),
-		readBuffer:        buffers.NewSyncBuffer(readBufferSize),
+		readBuffer:        buffers.NewSyncBuffer(readBufferSize * receiveBufferMultiplier),
 		writeBuffer:       buffers.NewSyncBuffer(writeBufferSize),
 	}
 	newBaseConn.SetCallbacks(&libutp.CallbackTable{
@@ -977,12 +983,23 @@ func onReadCallback(userdata interface{}, buf []byte) {
 	}
 
 	if ok := c.readBuffer.TryAppend(buf); !ok {
-		// I think this should not happen; the flow control mechanism should
-		// keep us from getting more data than the receive buffer can hold.
+		// We've received more data than the receive buffer can hold, even with
+		// receiveBufferMultiplier. We could keep on scaling up the receive
+		// buffer forever, or we can give up on the connection. Since this is
+		// expected to be uncommon, we'll go with dropping the connection for
+		// now.
 		used := c.readBuffer.SpaceUsed()
 		avail := c.readBuffer.SpaceAvailable()
-		c.logger.Error("receive buffer overflow", zap.Int("buffer-size", used+avail), zap.Int("buffer-holds", c.readBuffer.SpaceUsed()), zap.Int("new-data", len(buf)))
-		panic("receive buffer overflow")
+		err := ErrReceiveBufferOverflow
+		c.logger.Error("receive buffer overflow", zap.Int("buffer-size", used+avail), zap.Int("buffer-holds", used), zap.Int("new-data", len(buf)))
+		c.setEncounteredError(err)
+
+		// clear out write buffer; we won't be able to send it now. If a call
+		// to Close() is already waiting, we don't need to make it wait any
+		// longer
+		c.writeBuffer.Close()
+		// this will allow any pending reads to complete (as short reads)
+		c.readBuffer.CloseForWrites()
 	}
 	c.stateDebugLog("finishing onReadCallback")
 }
