@@ -16,9 +16,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/go-logr/logr"
-	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/sync/errgroup"
@@ -33,8 +32,8 @@ const (
 )
 
 func TestUTPConnsInSerial(t *testing.T) {
-	logger := zapr.NewLogger(zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel))))
-	l := newTestServer(t, logger.WithName("server"))
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel)))
+	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
 	group.Go(func(ctx context.Context) error {
@@ -54,7 +53,7 @@ func TestUTPConnsInSerial(t *testing.T) {
 	}, "task", "accept")
 	group.Go(func(ctx context.Context) error {
 		for i := 0; i < repeats; i++ {
-			if err := makeConn(ctx, logger.WithValues("i", i), l.Addr()); err != nil {
+			if err := makeConn(ctx, logger.With("i", i), l.Addr()); err != nil {
 				return err
 			}
 		}
@@ -65,8 +64,8 @@ func TestUTPConnsInSerial(t *testing.T) {
 }
 
 func TestUTPConnsInParallel(t *testing.T) {
-	logger := zapr.NewLogger(zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel))))
-	l := newTestServer(t, logger.WithName("server"))
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel)))
+	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
 	group.Go(func(ctx context.Context) error {
@@ -102,7 +101,7 @@ func TestUTPConnsInParallel(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func newTestServer(tb testing.TB, logger logr.Logger) *utp.Listener {
+func newTestServer(tb testing.TB, logger *zap.Logger) *utp.Listener {
 	lAddr, err := utp.ResolveUTPAddr("utp", "127.0.0.1:0")
 	require.NoError(tb, err)
 	server, err := utp.ListenUTPOptions("utp", lAddr, utp.WithLogger(logger))
@@ -167,7 +166,7 @@ func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 	return nil
 }
 
-func makeConn(ctx context.Context, logger logr.Logger, addr net.Addr) (err error) {
+func makeConn(ctx context.Context, logger *zap.Logger, addr net.Addr) (err error) {
 	netConn, err := utp.DialUTPOptions("utp", nil, addr.(*utp.Addr), utp.WithLogger(logger))
 	if err != nil {
 		return err

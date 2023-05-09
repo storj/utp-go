@@ -14,7 +14,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -121,7 +120,7 @@ func newFileStreamReceiver(logger *zap.Logger, listenAddr string, fileDest io.Wr
 		err = fmt.Errorf("could not listen on %q: %w", listenAddr, err)
 		return nil, err
 	}
-	sm := utp_file.NewUDPSocketManager(zapr.NewLogger(logger))
+	sm := utp_file.NewUDPSocketManager(logger)
 	sm.SetSocket(sock)
 
 	fsr := &fileStreamReceiver{

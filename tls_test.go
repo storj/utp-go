@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -83,12 +82,11 @@ func TestTLSOverUTPInParallel(t *testing.T) {
 	addrChan := make(chan *utp.Addr, 1)
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel)))
-	compatibleLogger := zapr.NewLogger(logger)
 
 	group := newLabeledErrgroup(context.Background())
 
 	group.Go(func(ctx context.Context) (err error) {
-		server, err := utp.ListenTLSOptions("utp", "127.0.0.1:0", &serverConfig, utp.WithLogger(compatibleLogger))
+		server, err := utp.ListenTLSOptions("utp", "127.0.0.1:0", &serverConfig, utp.WithLogger(logger))
 		if err != nil {
 			logger.Error("could not listen", zap.Error(err))
 			return err
@@ -117,7 +115,7 @@ func TestTLSOverUTPInParallel(t *testing.T) {
 	addr := <-addrChan
 	for i := 0; i < tlsTestRepeats; i++ {
 		group.Go(func(ctx context.Context) (err error) {
-			client, err := utp.DialTLSOptions(addr.Network(), addr.String(), &clientConfig, utp.WithLogger(compatibleLogger))
+			client, err := utp.DialTLSOptions(addr.Network(), addr.String(), &clientConfig, utp.WithLogger(logger))
 			if err != nil {
 				return err
 			}
