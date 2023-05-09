@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-logr/logr"
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
 	"storj.io/utp-go/libutp"
@@ -58,12 +58,12 @@ type UDPSocketManager struct {
 	*libutp.SocketMultiplexer
 	socket               *net.UDPConn
 	outQueue             []UDPOutgoing
-	Logger               logr.Logger
+	Logger               *zap.Logger
 	OnIncomingConnection func(*libutp.Socket) error
 }
 
 // NewUDPSocketManager creates a new UDPSocketManager.
-func NewUDPSocketManager(logger logr.Logger) *UDPSocketManager {
+func NewUDPSocketManager(logger *zap.Logger) *UDPSocketManager {
 	return &UDPSocketManager{
 		SocketMultiplexer: libutp.NewSocketMultiplexer(logger, nil),
 		Logger:            logger,
@@ -74,7 +74,7 @@ func NewUDPSocketManager(logger logr.Logger) *UDPSocketManager {
 func (usm *UDPSocketManager) SetSocket(sock *net.UDPConn) {
 	if usm.socket != nil && usm.socket != sock {
 		if err := usm.socket.Close(); err != nil {
-			usm.Logger.Error(err, "failed to close old UDP socket during SetSocket")
+			usm.Logger.Error("failed to close old UDP socket during SetSocket", zap.Error(err))
 		}
 	}
 	usm.socket = sock
@@ -86,10 +86,10 @@ func (usm *UDPSocketManager) Flush() {
 	for len(usm.outQueue) > 0 {
 		uo := usm.outQueue[0]
 
-		usm.Logger.V(1).Info("Flush->WriteTo", "contents", fmt.Sprintf("%x", uo.mem), "len", len(uo.mem))
+		usm.Logger.Info("Flush->WriteTo", zap.ByteString("contents", uo.mem), zap.Int("len", len(uo.mem)))
 		_, err := usm.socket.WriteToUDP(uo.mem, uo.to)
 		if err != nil {
-			usm.Logger.Error(err, "sendto failed")
+			usm.Logger.Error("sendto failed", zap.Error(err))
 			break
 		}
 		usm.outQueue = usm.outQueue[1:]
@@ -140,7 +140,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 					// (storj): do we have a way to know which previous send
 					// operation? or a way to tie it to an existing connection,
 					// so we can pass the error on?
-					usm.Logger.Error(nil, "got ECONNRESET from udp socket")
+					usm.Logger.Error("got ECONNRESET from udp socket")
 					continue
 				}
 				// EMSGSIZE - The message was too large to fit into
@@ -150,7 +150,7 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 					// (storj): this seems like a big huge hairy deal. the code
 					// shouldn't allow this to happen, and if it does, won't
 					// all subsequent traffic be potentially wrong?
-					usm.Logger.Error(nil, "got EMSGSIZE from udp socket")
+					usm.Logger.Error("got EMSGSIZE from udp socket")
 					continue
 				}
 				// any other error (such as EWOULDBLOCK) results in breaking the loop
@@ -159,14 +159,14 @@ func (usm *UDPSocketManager) performSelect(blockTime time.Duration, socketFd int
 
 			// Lookup the right UTP socket that can handle this message
 			if !usm.IsIncomingUTP(gotIncomingConnection, sendTo, usm, buffer[:receivedBytes], srcAddr) {
-				usm.Logger.V(1).Info("received a non-µTP packet on UDP port", "source-addr", srcAddr)
+				usm.Logger.Info("received a non-µTP packet on UDP port", zap.Stringer("source-addr", srcAddr))
 			}
 			break
 		}
 	}
 
 	if fds[0].Revents&unix.POLLERR != 0 {
-		usm.Logger.Error(nil, "error condition on socket manager socket")
+		usm.Logger.Error("error condition on socket manager socket")
 	}
 	return nil
 }
@@ -183,21 +183,21 @@ func (usm *UDPSocketManager) Send(p []byte, addr *net.UDPAddr) {
 
 	var err error
 	if len(usm.outQueue) == 0 {
-		usm.Logger.V(1).Info("Send->WriteTo", "contents", fmt.Sprintf("%x", p), "len", len(p))
+		usm.Logger.Info("Send->WriteTo", zap.ByteString("contents", p), zap.Int("len", len(p)))
 		_, err = usm.socket.WriteToUDP(p, addr)
 		if err != nil {
-			usm.Logger.Error(err, "sendto failed")
+			usm.Logger.Error("sendto failed", zap.Error(err))
 		}
 	}
 	if len(usm.outQueue) > 0 || err != nil {
 		// Buffer a packet.
 		if len(usm.outQueue) >= MaxOutgoingQueueSize {
-			usm.Logger.Error(nil, "no room to buffer outgoing packet")
+			usm.Logger.Error("no room to buffer outgoing packet")
 		} else {
 			memCopy := make([]byte, len(p))
 			copy(memCopy, p)
 			usm.outQueue = append(usm.outQueue, UDPOutgoing{to: addr, mem: memCopy})
-			usm.Logger.Error(nil, "buffering packet: %d", len(usm.outQueue))
+			usm.Logger.Error("buffering packet", zap.Int("len", len(usm.outQueue)))
 		}
 	}
 }
@@ -214,7 +214,7 @@ var ErrNotAcceptingConnections = errors.New("not accepting connections")
 
 func gotIncomingConnection(userdata interface{}, socket *libutp.Socket) {
 	usm := userdata.(*UDPSocketManager)
-	usm.Logger.V(1).Info("incoming connection received", "remote-addr", socket.GetPeerName())
+	usm.Logger.Info("incoming connection received", zap.Stringer("remote-addr", socket.GetPeerName()))
 	var err error
 	if usm.OnIncomingConnection != nil {
 		err = usm.OnIncomingConnection(socket)
@@ -222,9 +222,9 @@ func gotIncomingConnection(userdata interface{}, socket *libutp.Socket) {
 		err = ErrNotAcceptingConnections
 	}
 	if err != nil {
-		usm.Logger.Error(err, "rejecting connection")
+		usm.Logger.Error("rejecting connection", zap.Error(err))
 		if closeErr := socket.Close(); closeErr != nil {
-			usm.Logger.Error(closeErr, "could not close new socket")
+			usm.Logger.Error("could not close new socket", zap.Error(closeErr))
 		}
 	}
 }

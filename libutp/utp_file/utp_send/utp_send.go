@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -79,7 +78,7 @@ func main() {
 		logger.Fatal("file is 0 bytes")
 	}
 
-	sm := utp_file.NewUDPSocketManager(zapr.NewLogger(logger))
+	sm := utp_file.NewUDPSocketManager(logger)
 
 	udpSock, err := utp_file.MakeSocket(":0")
 	if err != nil {
